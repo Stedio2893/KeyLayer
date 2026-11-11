@@ -1,0 +1,7 @@
+# Build output (si rigenera con build.bat) e configurazione personale
+dist/
+*.ini
+
+# Windows
+Thumbs.db
+desktop.ini
