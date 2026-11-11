@@ -151,6 +151,8 @@ namespace KeyLayer
         public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
         [DllImport("user32.dll")]
         public static extern bool ChangeWindowMessageFilterEx(IntPtr hWnd, int msg, uint action, IntPtr pChangeFilterStruct);
 

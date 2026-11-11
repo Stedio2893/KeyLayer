@@ -11,7 +11,7 @@ if not exist "%CSC%" (
 if not exist app.ico powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-icon.ps1
 if not exist dist mkdir dist
 "%CSC%" /nologo /target:winexe /optimize+ /platform:anycpu /out:dist\KeyLayer.exe /win32icon:app.ico ^
-  /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll src\*.cs
+  /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:Microsoft.VisualBasic.dll src\*.cs
 if errorlevel 1 (
   echo.
   echo Compilazione FALLITA.

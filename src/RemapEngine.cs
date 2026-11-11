@@ -24,7 +24,9 @@ namespace KeyLayer
         sealed class Held
         {
             public Mapping M;
-            public readonly List<int> Mods = new List<int>();
+            public bool HasLayerOff;
+            public readonly List<int> Mods = new List<int>();        // modifiers we pressed for the target
+            public readonly List<int> Suppressed = new List<int>();  // user's modifiers we released (Shift+X variants)
         }
 
         readonly object sync = new object();
@@ -294,7 +296,8 @@ namespace KeyLayer
                 // Hold mode: the first non-modifier key decides what this hold means.
                 if (holdDown && holdDecision == HoldUndecided && !IsModifier(vk))
                 {
-                    if (map.ContainsKey(vk)) holdDecision = HoldLayer;
+                    Mapping probe; int probeFlags;
+                    if (Lookup(vk, out probe, out probeFlags)) holdDecision = HoldLayer;
                     else
                     {
                         BecomePlainHold();
@@ -310,16 +313,30 @@ namespace KeyLayer
                 if (held.TryGetValue(vk, out hd))
                 {
                     // auto-repeat of a key that was remapped when it went down
-                    if (hd.M.Vk != 0) Send(hd.M.Vk, false);
+                    var rep = new List<Native.INPUT>();
+                    if (hd.M.IsSimple) { if (hd.M.Vk != 0) AddKey(rep, hd.M.Vk, false); }
+                    else if (!hd.HasLayerOff) RunSequence(hd.M, rep, hd.Suppressed);
+                    Flush(rep);
                     return (IntPtr)1;
                 }
                 Mapping m;
-                if (active && enabled && map.TryGetValue(vk, out m))
+                int variant;
+                if (active && enabled && Lookup(vk, out m, out variant))
                 {
                     hd = new Held { M = m };
+                    foreach (KeyStroke s in m.Steps) if (s.Vk == KeyNames.LayerOff) hd.HasLayerOff = true;
                     held[vk] = hd;
-                    PressMods(m.Mods, hd.Mods);
-                    if (m.Vk != 0) Send(m.Vk, false);
+                    var batch = new List<Native.INPUT>();
+                    // "Shift+G" / "Ctrl+F" variants: the physical modifier must not reach the target.
+                    if ((variant & KeyNames.SrcShift) != 0) Suppress(batch, hd.Suppressed, 0xA0, 0xA1);
+                    if ((variant & KeyNames.SrcCtrl) != 0) Suppress(batch, hd.Suppressed, 0xA2, 0xA3);
+                    if (m.IsSimple)
+                    {
+                        PressMods(batch, m.Mods, hd.Mods, hd.Suppressed);
+                        if (m.Vk != 0) AddKey(batch, m.Vk, false);
+                        Flush(batch);
+                    }
+                    else RunSequence(m, batch, hd.Suppressed);
                     return (IntPtr)1;
                 }
             }
@@ -329,12 +346,73 @@ namespace KeyLayer
                 if (held.TryGetValue(vk, out hd))
                 {
                     held.Remove(vk);
-                    if (hd.M.Vk != 0) Send(hd.M.Vk, true);
-                    for (int i = hd.Mods.Count - 1; i >= 0; i--) Send(hd.Mods[i], true);
+                    var batch = new List<Native.INPUT>();
+                    if (hd.M.IsSimple && hd.M.Vk != 0) AddKey(batch, hd.M.Vk, true);
+                    for (int i = hd.Mods.Count - 1; i >= 0; i--) AddKey(batch, hd.Mods[i], true);
+                    foreach (int mod in hd.Suppressed) if (pressed.Contains(mod)) AddKey(batch, mod, false); // give the modifier back
+                    Flush(batch);
                     return (IntPtr)1;
                 }
             }
             return Native.CallNextHookEx(kbHook, nCode, wParam, lParam);
+        }
+
+        /// <summary>Physically held, and not the toggle key that hold mode swallows.</summary>
+        bool PhysicallyHeld(int vk)
+        {
+            return pressed.Contains(vk) && !((ActivationMode)mode == ActivationMode.Hold && vk == toggleVk);
+        }
+
+        /// <summary>Finds the mapping for a key: the Shift/Ctrl variant matching the held modifiers first, then the plain key.</summary>
+        bool Lookup(int vk, out Mapping m, out int variant)
+        {
+            Dictionary<int, Mapping> mp = map;
+            int f = 0;
+            if (PhysicallyHeld(0xA0) || PhysicallyHeld(0xA1)) f |= KeyNames.SrcShift;
+            if (PhysicallyHeld(0xA2) || PhysicallyHeld(0xA3)) f |= KeyNames.SrcCtrl;
+            if (f != 0 && mp.TryGetValue(vk | f, out m)) { variant = f; return true; }
+            variant = 0;
+            return mp.TryGetValue(vk, out m);
+        }
+
+        void Suppress(List<Native.INPUT> batch, List<int> suppressed, int left, int right)
+        {
+            foreach (int mod in new[] { left, right })
+                if (PhysicallyHeld(mod)) { AddKey(batch, mod, true); suppressed.Add(mod); }
+        }
+
+        /// <summary>Is any key of a modifier group logically down (held by the user and not suppressed by us)?</summary>
+        bool GroupDown(List<int> suppressed, params int[] keys)
+        {
+            foreach (int k in keys) if (PhysicallyHeld(k) && !suppressed.Contains(k)) return true;
+            return false;
+        }
+
+        void PressMods(List<Native.INPUT> batch, int mods, List<int> pressedMods, List<int> suppressed)
+        {
+            if ((mods & Mapping.ModCtrl) != 0 && !GroupDown(suppressed, 0xA2, 0xA3)) { AddKey(batch, 0xA2, false); pressedMods.Add(0xA2); }
+            if ((mods & Mapping.ModShift) != 0 && !GroupDown(suppressed, 0xA0, 0xA1)) { AddKey(batch, 0xA0, false); pressedMods.Add(0xA0); }
+            if ((mods & Mapping.ModAlt) != 0 && !GroupDown(suppressed, 0xA4, 0xA5)) { AddKey(batch, 0xA4, false); pressedMods.Add(0xA4); }
+            if ((mods & Mapping.ModWin) != 0 && !GroupDown(suppressed, 0x5B, 0x5C)) { AddKey(batch, 0x5B, false); pressedMods.Add(0x5B); }
+        }
+
+        /// <summary>Taps every step of a sequence; "LayerOff" switches the layer off at that point.</summary>
+        void RunSequence(Mapping m, List<Native.INPUT> batch, List<int> suppressed)
+        {
+            foreach (KeyStroke s in m.Steps)
+            {
+                if (s.Vk == KeyNames.LayerOff)
+                {
+                    Flush(batch);
+                    SetActive(false);
+                    continue;
+                }
+                var mods = new List<int>();
+                PressMods(batch, s.Mods, mods, suppressed);
+                if (s.Vk != 0) { AddKey(batch, s.Vk, false); AddKey(batch, s.Vk, true); }
+                for (int i = mods.Count - 1; i >= 0; i--) AddKey(batch, mods[i], true);
+            }
+            Flush(batch);
         }
 
         /// <summary>Hold mode: the toggle key is swallowed; the layer lives while it is held.</summary>
@@ -362,45 +440,57 @@ namespace KeyLayer
             return (IntPtr)1;
         }
 
-        static bool IsDown(int vk) { return (Native.GetAsyncKeyState(vk) & 0x8000) != 0; }
-
-        static void PressMods(int mods, List<int> pressedMods)
-        {
-            if ((mods & Mapping.ModCtrl) != 0 && !IsDown(0x11)) { Send(0xA2, false); pressedMods.Add(0xA2); }
-            if ((mods & Mapping.ModShift) != 0 && !IsDown(0x10)) { Send(0xA0, false); pressedMods.Add(0xA0); }
-            if ((mods & Mapping.ModAlt) != 0 && !IsDown(0x12)) { Send(0xA4, false); pressedMods.Add(0xA4); }
-            if ((mods & Mapping.ModWin) != 0 && !IsDown(0x5B) && !IsDown(0x5C)) { Send(0x5B, false); pressedMods.Add(0x5B); }
-        }
-
         void ReleaseAll()
         {
+            var batch = new List<Native.INPUT>();
             foreach (Held hd in held.Values)
             {
-                if (hd.M.Vk != 0) Send(hd.M.Vk, true);
-                for (int i = hd.Mods.Count - 1; i >= 0; i--) Send(hd.Mods[i], true);
+                if (hd.M.IsSimple && hd.M.Vk != 0) AddKey(batch, hd.M.Vk, true);
+                for (int i = hd.Mods.Count - 1; i >= 0; i--) AddKey(batch, hd.Mods[i], true);
             }
             held.Clear();
-            if (holdInjectedToggle) { Send(toggleVk, true); holdInjectedToggle = false; }
+            if (holdInjectedToggle) { AddKey(batch, toggleVk, true); holdInjectedToggle = false; }
+            Flush(batch);
         }
 
         static readonly int InputSize = Marshal.SizeOf(typeof(Native.INPUT));
 
+        static Native.INPUT MakeKey(int vk, uint scan, bool extended, bool keyUp)
+        {
+            var inp = new Native.INPUT();
+            inp.type = Native.INPUT_KEYBOARD;
+            inp.u.ki.wVk = (ushort)vk;
+            inp.u.ki.wScan = (ushort)scan;
+            uint flags = keyUp ? Native.KEYEVENTF_KEYUP : 0;
+            if (extended) flags |= Native.KEYEVENTF_EXTENDEDKEY;
+            inp.u.ki.dwFlags = flags;
+            inp.u.ki.dwExtraInfo = Signature;
+            return inp;
+        }
+
+        static void AddKey(List<Native.INPUT> batch, int vk, bool keyUp)
+        {
+            batch.Add(MakeKey(vk, Native.MapVirtualKey((uint)vk, 0 /* MAPVK_VK_TO_VSC */), KeyNames.IsExtended(vk), keyUp));
+        }
+
+        /// <summary>Sends a batch in one SendInput call, so nothing can interleave with it.</summary>
+        static void Flush(List<Native.INPUT> batch)
+        {
+            if (batch.Count == 0) return;
+            Native.SendInput((uint)batch.Count, batch.ToArray(), InputSize);
+            batch.Clear();
+        }
+
         static void Send(int vk, bool keyUp)
         {
-            SendScan(vk, Native.MapVirtualKey((uint)vk, 0 /* MAPVK_VK_TO_VSC */), KeyNames.IsExtended(vk), keyUp);
+            var b = new List<Native.INPUT>();
+            AddKey(b, vk, keyUp);
+            Flush(b);
         }
 
         static void SendScan(int vk, uint scan, bool extended, bool keyUp)
         {
-            var inp = new Native.INPUT[1];
-            inp[0].type = Native.INPUT_KEYBOARD;
-            inp[0].u.ki.wVk = (ushort)vk;
-            inp[0].u.ki.wScan = (ushort)scan;
-            uint flags = keyUp ? Native.KEYEVENTF_KEYUP : 0;
-            if (extended) flags |= Native.KEYEVENTF_EXTENDEDKEY;
-            inp[0].u.ki.dwFlags = flags;
-            inp[0].u.ki.dwExtraInfo = Signature;
-            Native.SendInput(1, inp, InputSize);
+            Native.SendInput(1, new[] { MakeKey(vk, scan, extended, keyUp) }, InputSize);
         }
     }
 }

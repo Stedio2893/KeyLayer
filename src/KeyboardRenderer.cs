@@ -15,6 +15,9 @@ namespace KeyLayer
         public bool LayerActive;
         public IntPtr Hkl;
         public Color Background = Color.FromArgb(225, 16, 16, 20);
+        public int Variant;          // KeyNames.SrcShift / SrcCtrl: show the mappings of that variant
+        public bool StrictVariant;   // true: with a variant, show only its own mappings (settings); false: fall back to plain keys (overlay)
+        public string ProfileName;   // drawn in the empty area under the navigation cluster
     }
 
     /// <summary>Draws the keyboard; shared by the overlay and the settings window.</summary>
@@ -97,7 +100,12 @@ namespace KeyLayer
                 {
                     RectangleF r = ToPx(k.R, unit, m, pad);
                     Mapping map = null;
-                    bool mapped = st.Map != null && k.Vk != 0 && st.Map.TryGetValue(k.Vk, out map);
+                    bool mapped = false;
+                    if (st.Map != null && k.Vk != 0)
+                    {
+                        if (st.Variant != 0 && st.Map.TryGetValue(k.Vk | st.Variant, out map)) mapped = true;
+                        else if ((st.Variant == 0 || !st.StrictVariant) && st.Map.TryGetValue(k.Vk, out map)) mapped = true;
+                    }
                     bool isPressed = st.Pressed != null && st.Pressed.Contains(k.Vk);
                     bool isToggle = k.Vk == st.ToggleVk;
 
@@ -127,6 +135,23 @@ namespace KeyLayer
                         var tr = RectangleF.Inflate(r, -unit * 0.05f, -unit * 0.03f);
                         Color c = (isToggle && st.LayerActive) ? Yellow : TextNormal;
                         DrawText(g, orig, tr, orig.Length <= 2 ? unit * 0.38f : unit * 0.25f, c, center, false);
+                    }
+                }
+
+                // Profile name (and active variant) in the free space under Ins/Home/PgUp - Del/End/PgDn
+                string info = st.ProfileName ?? "";
+                if (st.Variant != 0)
+                    info += (info.Length > 0 ? "\n" : "") + ((st.Variant & KeyNames.SrcCtrl) != 0 ? "Ctrl" : "") +
+                            ((st.Variant & KeyNames.SrcMask) == KeyNames.SrcMask ? "+" : "") +
+                            ((st.Variant & KeyNames.SrcShift) != 0 ? "Shift" : "") + " +";
+                if (info.Length > 0)
+                {
+                    var area = new RectangleF(m + 15.25f * unit, m + 3.3f * unit, 3f * unit, 0.9f * unit);
+                    using (var sf = new StringFormat())
+                    {
+                        sf.Alignment = StringAlignment.Center;
+                        sf.LineAlignment = StringAlignment.Center;
+                        DrawText(g, info, area, unit * 0.3f, st.Variant != 0 ? Yellow : TextDim, sf, true);
                     }
                 }
             }

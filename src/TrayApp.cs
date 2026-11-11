@@ -162,19 +162,39 @@ namespace KeyLayer
                 miPause.Checked = !engine.Enabled;
                 UpdateTrayText();
             });
+            var miProfile = new ToolStripMenuItem("Profilo");
+            miProfile.DropDownItems.Add("(caricamento)");
+            miProfile.DropDownOpening += delegate
+            {
+                miProfile.DropDownItems.Clear();
+                foreach (Profile p in cfg.Profiles)
+                {
+                    string name = p.Name;
+                    var it = new ToolStripMenuItem(name, null, delegate { SwitchProfile(name); });
+                    it.Checked = p == cfg.Active;
+                    miProfile.DropDownItems.Add(it);
+                }
+            };
             var miFolder = new ToolStripMenuItem("Apri cartella del programma", null, delegate
             {
                 try { Process.Start("explorer.exe", "\"" + AppDomain.CurrentDomain.BaseDirectory + "\""); } catch (Exception) { }
             });
             var miExit = new ToolStripMenuItem("Esci", null, delegate { Exit(); });
-            menu.Items.AddRange(new ToolStripItem[] { miSettings, miLayer, miPause, new ToolStripSeparator(), miFolder, new ToolStripSeparator(), miExit });
+            menu.Items.AddRange(new ToolStripItem[] { miSettings, miLayer, miProfile, miPause, new ToolStripSeparator(), miFolder, new ToolStripSeparator(), miExit });
             return menu;
+        }
+
+        void SwitchProfile(string name)
+        {
+            cfg.ActiveProfileName = name;
+            ApplyConfig();
+            if (settings != null && !settings.IsDisposed) settings.OnProfileChanged();
         }
 
         void UpdateTrayText()
         {
             string state = !engine.Enabled ? "sospeso" : engine.Active ? "layer ATTIVO" : cfg.GestureText();
-            string t = "KeyLayer – " + state;
+            string t = "KeyLayer – " + cfg.Active.Name + " – " + state;
             tray.Text = t.Length > 63 ? t.Substring(0, 63) : t;
             tray.Icon = !engine.Enabled ? icoPaused : engine.Active ? icoActive : icoIdle;
             if (miLayer != null)
@@ -270,13 +290,21 @@ namespace KeyLayer
                 overlayBounds = new Rectangle(ComputePosition(w, h, dpi, c, overlayScreen.WorkingArea), new Size(w, h));
             }
 
+            // While Shift / Ctrl are held, show what the keys do with that modifier (e.g. Vim's Shift+G).
+            int[] pressed = engine.Pressed;
+            bool holdToggle = cfg.Mode == ActivationMode.Hold;
+            Func<int, bool> held = vk => Array.IndexOf(pressed, vk) >= 0 && !(holdToggle && vk == cfg.ToggleVk);
+            int variant = (held(0xA0) || held(0xA1) ? KeyNames.SrcShift : 0) | (held(0xA2) || held(0xA3) ? KeyNames.SrcCtrl : 0);
+
             var st = new RenderState
             {
                 Map = engine.Map,
-                Pressed = engine.Pressed,
+                Pressed = pressed,
                 ToggleVk = cfg.ToggleVk,
                 LayerActive = true,
                 Hkl = overlayHkl,
+                Variant = variant,
+                ProfileName = cfg.Active.Name,
             };
             using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
             {
