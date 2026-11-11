@@ -35,14 +35,22 @@ L'overlay compare sempre sul desktop virtuale su cui stai lavorando, e se cambi 
 
 Finché KeyLayer è in esecuzione vengono disattivati i **Tasti permanenti** e la loro scorciatoia (5 volte Shift), oltre alla scorciatoia di **Filtro tasti** (tenere premuto Shift destro per 8 secondi, che in modalità "tieni premuto" potrebbe scattare). La modifica vale solo per la sessione corrente e all'uscita vengono ripristinate le impostazioni originali. Si può disattivare questa funzione dalle Impostazioni.
 
-Di default **I J K L** diventano **↑ ← ↓ →**. Funzionano anche le combinazioni: Shift + J = Shift + ← (selezione), Ctrl + J = Ctrl + ←.
+Mappatura predefinita (pulsante «Preset» nelle Impostazioni):
+
+| Tasto | Diventa |
+|---|---|
+| I / J / K / L | ↑ / ← / ↓ / → |
+| U / O | Pagina su / Pagina giù |
+| N / M | Inizio (Home) / Fine (End) |
+
+Funzionano anche le combinazioni: Shift + J = Shift + ← (selezione), Ctrl + J = Ctrl + ←, Shift + M = seleziona fino a fine riga.
 
 ## Impostazioni
 
 Fai clic sull'icona nella barra delle applicazioni (oppure riavvia l'exe mentre è già in esecuzione):
 
 - clicca un tasto sulla tastiera disegnata, oppure usa **«Premi un tasto…»**;
-- scegli in cosa trasformarlo (frecce, Home/Fine, PagSu/PagGiù, Canc, Esc, tasti multimediali, lettere, F1-F24, …) e, se vuoi, aggiungi i modificatori Ctrl/Shift/Alt/Win (es. `U` → `Ctrl+←` per saltare di una parola);
+- scegli dal menu a tendina «Diventa» in cosa trasformarlo (frecce, Home/Fine, PagSu/PagGiù, Canc, Esc, tasti multimediali, lettere, F1-F24, …) e, se vuoi, aggiungi i modificatori Ctrl/Shift/Alt/Win (es. `Y` → `Ctrl+←` per saltare di una parola), poi premi **Assegna**;
 - «Nessuno» disattiva il tasto mentre il layer è attivo;
 - opzioni: tasto di attivazione, posizione, opacità e dimensione dell'overlay, avvio con Windows.
 
@@ -63,8 +71,11 @@ I=Up
 J=Left
 K=Down
 L=Right
-U=Ctrl+Left
-O=Ctrl+Right
+U=PageUp
+O=PageDown
+N=Home
+M=End
+Y=Ctrl+Left
 ```
 
 ## Note

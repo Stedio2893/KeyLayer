@@ -70,6 +70,10 @@ namespace KeyLayer
             Remap['J'] = new Mapping(0x25, 0); // Left
             Remap['K'] = new Mapping(0x28, 0); // Down
             Remap['L'] = new Mapping(0x27, 0); // Right
+            Remap['U'] = new Mapping(0x21, 0); // Page Up
+            Remap['O'] = new Mapping(0x22, 0); // Page Down
+            Remap['N'] = new Mapping(0x24, 0); // Home
+            Remap['M'] = new Mapping(0x23, 0); // End
         }
 
         static int ParseInt(string s, int def, int min, int max)

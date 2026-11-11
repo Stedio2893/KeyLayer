@@ -148,7 +148,8 @@ namespace KeyLayer
             {
                 using (var f = new Font(family, size, style, GraphicsUnit.Pixel))
                 {
-                    SizeF sz = g.MeasureString(s, f, PointF.Empty, StringFormat.GenericTypographic);
+                    // Same (non-typographic) layout DrawString uses, padding included, so the fitted text is never clipped.
+                    SizeF sz = g.MeasureString(s, f);
                     if ((sz.Width <= r.Width && sz.Height <= r.Height * 1.3f) || size < 7f)
                     {
                         using (var b = new SolidBrush(c)) g.DrawString(s, f, b, r, sf);

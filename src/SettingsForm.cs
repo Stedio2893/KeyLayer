@@ -133,7 +133,7 @@ namespace KeyLayer
             };
             left.Controls.Add(list);
             var lb = Flow(FlowDirection.LeftToRight);
-            lb.Controls.Add(Btn("Preset Vim (IJKL = frecce)", delegate { cfg.ApplyVimPreset(); Changed(); SelectKey(selected); }));
+            lb.Controls.Add(Btn("Preset (IJKL frecce, U/O pag., N/M inizio/fine)", delegate { cfg.ApplyVimPreset(); Changed(); SelectKey(selected); }));
             lb.Controls.Add(Btn("Rimuovi tutte", delegate
             {
                 if (cfg.Remap.Count == 0) return;
