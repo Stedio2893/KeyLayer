@@ -36,8 +36,15 @@ namespace KeyLayer
 
         KeyboardView kb;
         ListView list;
+        Panel scroller;            // scrolls when the window is smaller than its content
+        TableLayoutPanel root, mid, foot;
+        GroupBox gbOpt;
+        Label path;
+        bool fitting, wideLayout;
+        readonly Timer fitTimer = new Timer { Interval = 60 };
         Label lblSel, lblOpacity, lblScale, hint;
-        ComboBox cbTarget, cbToggle, cbPos, cbMode, cbProfile;
+        ComboBox cbTarget, cbToggle, cbPos, cbMode, cbProfile, cbProfKey, cbProfMode;
+        const int OtherKey = -1;   // «Altro tasto…» in the switcher lists
         CheckBox chCtrl, chShift, chAlt, chWin, chAuto, chSticky;
         RadioButton rbPlain, rbShift, rbCtrl;
         TextBox tbSeq, tbLabel;
@@ -62,11 +69,9 @@ namespace KeyLayer
             Text = "KeyLayer – Impostazioni";
             Font = new Font("Segoe UI", 9f);
             AutoScaleMode = AutoScaleMode.None;
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true;
             StartPosition = FormStartPosition.CenterScreen;
-            AutoSize = true;
-            AutoSizeMode = AutoSizeMode.GrowAndShrink;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { }
 
             BuildUi();
@@ -74,6 +79,112 @@ namespace KeyLayer
             RefreshProfiles();
             RefreshList();
             SelectKey(-1);
+
+            // Start at the natural size (options beside the keyboard if the screen is wide enough),
+            // never larger than the screen the window opens on.
+            Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Size frame = Size - ClientSize; // borders and title bar
+            Size maxClient = wa.Size - frame;
+            Arrange(CanBeWide(maxClient.Width - root.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth));
+            root.PerformLayout();
+            Size pref = root.PreferredSize;
+            pref.Width += SystemInformation.VerticalScrollBarWidth; // FitToWindow always keeps room for it
+            ClientSize = new Size(Math.Min(pref.Width, maxClient.Width), Math.Min(pref.Height, maxClient.Height));
+            MinimumSize = new Size(S(480), S(360));
+            // Refit once the size settles, not at every pixel of a drag (a full relayout takes tens of ms).
+            fitTimer.Tick += delegate { fitTimer.Stop(); FitToWindow(); };
+            Resize += delegate { fitTimer.Stop(); fitTimer.Start(); };
+            FitToWindow();
+        }
+
+        int OptionsWidth() { return gbOpt.PreferredSize.Width + S(10); }
+
+        /// <summary>Room for the options beside the keyboard and the profile / key editor block?</summary>
+        bool CanBeWide(int availW)
+        {
+            int left = Math.Max(mid.PreferredSize.Width, KeyboardView.SizeFor(S(BaseUnit)).Width);
+            return availW >= left + OptionsWidth();
+        }
+
+        /// <summary>Options below everything (narrow window) or in a column beside the keyboard (wide window).</summary>
+        void Arrange(bool wide)
+        {
+            if (wide == wideLayout) return;
+            wideLayout = wide;
+            root.SuspendLayout();
+            if (wide)
+            {
+                root.SetCellPosition(gbOpt, new TableLayoutPanelCellPosition(1, 1));
+                root.SetRowSpan(gbOpt, 2);
+                gbOpt.Margin = new Padding(S(10), 0, 0, S(10));
+            }
+            else
+            {
+                root.SetCellPosition(gbOpt, new TableLayoutPanelCellPosition(0, 3));
+                root.SetRowSpan(gbOpt, 1);
+                gbOpt.Margin = new Padding(0, 0, S(10), S(10));
+            }
+            root.ResumeLayout(true);
+        }
+
+        const float BaseUnit = 32f, MinUnit = 18f, MaxUnit = 64f;   // keyboard key size (96-dpi pixels)
+        const int MinList = 110;                                    // remap list height (96-dpi pixels)
+
+        /// <summary>
+        /// The keyboard follows the window width (and shrinks if the height is short); the remap list takes
+        /// the spare height. Below the minimum sizes the window scrolls.
+        /// </summary>
+        void FitToWindow()
+        {
+            if (fitting || root == null || WindowState == FormWindowState.Minimized) return;
+            fitting = true;
+            try
+            {
+                scroller.SuspendLayout();
+                int availW = ClientSize.Width - root.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth;
+                int availH = ClientSize.Height;
+                SizeF one = KeyboardRenderer.Measure(1f);
+                bool wide = CanBeWide(availW);
+                Arrange(wide);
+                int optW = wide ? OptionsWidth() : 0;
+                availW -= optW; // the keyboard column
+
+                // keyboard: as wide as the window allows; the height may stop it from growing, never shrink it
+                // below its normal size (then the window scrolls)
+                list.Height = S(MinList);
+                root.PerformLayout();
+                int other = root.PreferredSize.Height - kb.Height;
+                float byW = (availW - 2) / one.Width;
+                float byH = (availH - other - S(4)) / one.Height; // slack for the rounding of the keyboard size
+                float unit = Math.Min(byW, Math.Max(byH, S(BaseUnit)));
+                unit = Math.Max(S(MinUnit), Math.Min(S(MaxUnit), unit));
+                kb.SetUnit(unit);
+
+                int contentW = Math.Max(kb.Width, mid.PreferredSize.Width) + optW;
+                hint.MaximumSize = new Size(contentW, 0);
+                path.MaximumSize = new Size(Math.Max(S(120), contentW - S(330)), 0);
+                foot.Width = contentW;
+
+                // list: the spare height. Measured with a tall probe, because the list only adds height once
+                // its column is taller than the key editor next to it.
+                int probe = Math.Max(S(MinList), availH);
+                list.Height = probe;
+                root.PerformLayout();
+                int excess = root.PreferredSize.Height - availH;
+                list.Height = Math.Max(S(MinList), probe - excess - S(4)); // a little slack: no scrollbar for a few pixels
+            }
+            finally
+            {
+                scroller.ResumeLayout(true);
+                // final check on the real sizes: a list a few pixels too tall must not cause a scrollbar
+                int overflow = root.Height - scroller.ClientSize.Height;
+                if (overflow > 0 && list.Height - overflow >= S(MinList))
+                {
+                    list.Height -= overflow;
+                    scroller.PerformLayout();
+                }
+                fitting = false;
+            }
         }
 
         int S(float px) { return (int)Math.Round(px * dpi / 96f); }
@@ -100,10 +211,14 @@ namespace KeyLayer
 
         void BuildUi()
         {
-            var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(S(12)) };
-            Controls.Add(root);
+            scroller = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+            Controls.Add(scroller);
+            // rows: hint / keyboard / profiles+editor / options (narrow window) / footer.
+            // A wide window moves the options to column 1, next to the keyboard (see Arrange).
+            root = new TableLayoutPanel { ColumnCount = 2, RowCount = 5, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(S(12)), Margin = Padding.Empty };
+            scroller.Controls.Add(root);
 
-            kb = new KeyboardView(keys, S(32));
+            kb = new KeyboardView(keys, S(BaseUnit));
             kb.State.Map = cfg.Remap;
             kb.State.ToggleVk = cfg.ToggleVk;
             kb.State.Hkl = hkl;
@@ -120,11 +235,12 @@ namespace KeyLayer
                 Margin = new Padding(0, 0, 0, S(8)),
             };
             UpdateHint();
-            root.Controls.Add(hint);
-            root.Controls.Add(kb);
+            root.Controls.Add(hint, 0, 0);
+            root.SetColumnSpan(hint, 2);
+            root.Controls.Add(kb, 0, 1);
 
-            var mid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty };
-            root.Controls.Add(mid);
+            mid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty };
+            root.Controls.Add(mid, 0, 2);
 
             // --- Profile + remap list ---
             var left = Flow(FlowDirection.TopDown);
@@ -162,10 +278,38 @@ namespace KeyLayer
             }));
             left.Controls.Add(pb);
 
+            // the profile's own switcher
+            var pk = Flow(FlowDirection.LeftToRight);
+            pk.Margin = new Padding(0, S(4), 0, 0);
+            pk.Controls.Add(new Label { AutoSize = true, Text = "Tasto proprio:", Margin = new Padding(0, S(7), S(4), 0) });
+            cbProfKey = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(118), MaxDropDownItems = 20, Margin = new Padding(0, S(3), S(6), 0) };
+            FillSwitcherChoices(cbProfKey, true);
+            cbProfKey.SelectionChangeCommitted += delegate { OnProfileKeyChosen(); };
+            pk.Controls.Add(cbProfKey);
+            cbProfMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(112), Margin = new Padding(0, S(3), 0, 0) };
+            foreach (ActivationMode m in new[] { ActivationMode.Hold, ActivationMode.DoubleTap, ActivationMode.SingleTap })
+                cbProfMode.Items.Add(new Item((int)m, AppConfig.ModeShortName(m)));
+            cbProfMode.SelectionChangeCommitted += delegate
+            {
+                var it = cbProfMode.SelectedItem as Item;
+                if (it == null) return;
+                cfg.Active.KeyMode = (ActivationMode)it.Value;
+                Changed();
+                UpdateHint();
+            };
+            pk.Controls.Add(cbProfMode);
+            var tip = new ToolTip();
+            const string profKeyTip = "Attiva direttamente questo profilo con un suo tasto (es. F9), qualunque sia il profilo selezionato.\n" +
+                                      "«Tieni premuto»: il layer resta attivo finché tieni premuto il tasto.\n" +
+                                      "«Doppio tocco»: due tocchi rapidi lo accendono, altri due lo spengono.";
+            tip.SetToolTip(cbProfKey, profKeyTip);
+            tip.SetToolTip(cbProfMode, profKeyTip);
+            left.Controls.Add(pk);
+
             list = new ListView
             {
                 View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = false,
-                HeaderStyle = ColumnHeaderStyle.Nonclickable, Size = new Size(S(340), S(205)), Margin = new Padding(0, S(6), 0, S(2)),
+                HeaderStyle = ColumnHeaderStyle.Nonclickable, Size = new Size(S(340), S(180)), Margin = new Padding(0, S(6), 0, S(2)),
             };
             list.Columns.Add("Tasto", S(90));
             list.Columns.Add("Diventa", S(226));
@@ -241,21 +385,16 @@ namespace KeyLayer
 
             // --- Options ---
             var opt = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty };
-            cbToggle = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(200) };
-            foreach (int vk in AppConfig.ToggleChoices) cbToggle.Items.Add(new Item(vk, AppConfig.ToggleName(vk)));
-            cbToggle.SelectedIndexChanged += delegate
+            cbToggle = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(200), MaxDropDownItems = 20 };
+            FillSwitcherChoices(cbToggle, false);
+            cbToggle.SelectionChangeCommitted += delegate
             {
-                if (loading) return;
                 var it = cbToggle.SelectedItem as Item;
                 if (it == null) return;
-                cfg.ToggleVk = it.Value;
-                cfg.Remap.Remove(it.Value);
-                kb.State.ToggleVk = it.Value;
-                Changed();
-                SelectKey(selected);
-                UpdateHint();
+                if (it.Value == OtherKey) CaptureSwitcher(SetMainSwitcher, delegate { SelectSwitcher(cbToggle, cfg.ToggleVk); });
+                else SetMainSwitcher(it.Value);
             };
-            cbMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(280) };
+            cbMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(250) };
             foreach (ActivationMode m in new[] { ActivationMode.DoubleTap, ActivationMode.Hold, ActivationMode.SingleTap })
                 cbMode.Items.Add(new Item((int)m, AppConfig.ModeName(m)));
             cbMode.SelectedIndexChanged += delegate
@@ -267,14 +406,14 @@ namespace KeyLayer
                 changed();
                 UpdateHint();
             };
-            chSticky = new CheckBox { Text = "Disattiva «Tasti permanenti» (e la scorciatoia di «Filtro tasti») mentre KeyLayer è in esecuzione", AutoSize = true, Margin = new Padding(0, S(6), 0, 0) };
+            chSticky = new CheckBox { Text = "Disattiva «Tasti permanenti» mentre KeyLayer è attivo", AutoSize = true, Margin = new Padding(0, S(6), 0, 0) };
             chSticky.CheckedChanged += delegate
             {
                 if (loading) return;
                 cfg.DisableStickyKeys = chSticky.Checked;
                 changed();
             };
-            cbPos = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(280) };
+            cbPos = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(250) };
             for (int i = 0; i < Positions.GetLength(0); i++) cbPos.Items.Add(new Item(Positions[i, 0], Positions[i, 1]));
             cbPos.SelectedIndexChanged += delegate
             {
@@ -296,7 +435,10 @@ namespace KeyLayer
                 lblScale.Text = tbScale.Value + " %";
                 if (!loading) { cfg.Scale = tbScale.Value; changed(); }
             };
-            chAuto = new CheckBox { Text = "Avvia con Windows (registro utente, si può togliere qui in ogni momento)", AutoSize = true, Margin = new Padding(0, S(6), 0, 0) };
+            chAuto = new CheckBox { Text = "Avvia con Windows", AutoSize = true, Margin = new Padding(0, S(6), 0, 0) };
+            var optTip = new ToolTip();
+            optTip.SetToolTip(chSticky, "Disattiva i «Tasti permanenti» e la scorciatoia di «Filtro tasti» finché KeyLayer è in esecuzione;\nall'uscita vengono ripristinati.");
+            optTip.SetToolTip(chAuto, "Aggiunge KeyLayer all'avvio di Windows (registro utente). Togli la spunta per rimuoverlo.");
             chAuto.CheckedChanged += delegate
             {
                 if (loading) return;
@@ -305,6 +447,10 @@ namespace KeyLayer
             };
 
             AddRow(opt, "Tasto di attivazione:", cbToggle, null);
+            var note = new Label { AutoSize = true, ForeColor = SystemColors.GrayText, Text = "attiva il profilo selezionato", Margin = new Padding(0, 0, 0, S(4)) };
+            opt.Controls.Add(note, 1, opt.RowCount);
+            opt.SetColumnSpan(note, 2);
+            opt.RowCount++;
             AddRow(opt, "Modalità:", cbMode, null);
             AddRow(opt, "Posizione overlay:", cbPos, null);
             AddRow(opt, "Opacità overlay:", tbOpacity, lblOpacity);
@@ -315,12 +461,12 @@ namespace KeyLayer
                 opt.SetColumnSpan(cb, 3);
                 opt.RowCount++;
             }
-            var gbOpt = Group("Opzioni", opt);
-            root.Controls.Add(gbOpt);
+            gbOpt = Group("Opzioni", opt);
+            root.Controls.Add(gbOpt, 0, 3);
 
             // --- Footer ---
-            var foot = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty, Width = kb.Width };
-            var path = new Label
+            foot = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty, Width = kb.Width };
+            path = new Label
             {
                 AutoSize = true, ForeColor = SystemColors.GrayText, Anchor = AnchorStyles.Left,
                 MaximumSize = new Size(kb.Width - S(330), 0),
@@ -341,7 +487,8 @@ namespace KeyLayer
             foot.Controls.Add(fb, 1, 0);
             foot.AutoSize = false;
             foot.Size = new Size(kb.Width, Math.Max(path.PreferredSize.Height, fb.PreferredSize.Height) + S(4));
-            root.Controls.Add(foot);
+            root.Controls.Add(foot, 0, 4);
+            root.SetColumnSpan(foot, 2);
             OnLayerChanged(engine.Active);
         }
 
@@ -423,16 +570,126 @@ namespace KeyLayer
             cbTarget.SelectedItem = added;
         }
 
+        // ---------------------------------------------------------------- switchers
+
+        void FillSwitcherChoices(ComboBox cb, bool withNone)
+        {
+            if (withNone) cb.Items.Add(new Item(0, "Nessuno"));
+            foreach (int vk in AppConfig.ToggleChoices) cb.Items.Add(new Item(vk, AppConfig.ToggleName(vk)));
+            cb.Items.Add(new Item(OtherKey, "Altro tasto… (premilo)"));
+        }
+
+        /// <summary>Shows vk in a switcher list, adding it before «Altro tasto…» if it is not one of the usual keys.</summary>
+        void SelectSwitcher(ComboBox cb, int vk)
+        {
+            bool was = loading;
+            loading = true;
+            foreach (object o in cb.Items)
+                if (((Item)o).Value == vk) { cb.SelectedItem = o; loading = was; return; }
+            var it = new Item(vk, AppConfig.ToggleName(vk));
+            cb.Items.Insert(cb.Items.Count - 1, it);
+            cb.SelectedItem = it;
+            loading = was;
+        }
+
+        /// <summary>«Altro tasto…»: the next key pressed becomes the switcher.</summary>
+        void CaptureSwitcher(Action<int> apply, Action cancel)
+        {
+            hint.Text = "Premi ora il tasto da usare per attivare il layer (per esempio un tasto funzione)…";
+            hint.ForeColor = Color.DarkOrange;
+            cbToggle.Enabled = cbProfKey.Enabled = false;
+            engine.BeginCapture(delegate (int vk)
+            {
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        hint.ForeColor = SystemColors.ControlText;
+                        cbToggle.Enabled = cbProfKey.Enabled = true;
+                        UpdateHint();
+                        if (vk == 0x1B) cancel(); // Esc: cancelled
+                        else apply(vk);
+                    }));
+                }
+                catch (InvalidOperationException) { }
+            });
+        }
+
+        /// <summary>Is vk free to become a switcher (for a profile, or the main one when p is null)? Asks about odd choices.</summary>
+        bool CanUseAsSwitcher(int vk, Profile p)
+        {
+            string name = AppConfig.ToggleName(vk);
+            if (p != null && vk == cfg.ToggleVk)
+            {
+                MessageBox.Show(this, "«" + name + "» è già il tasto di attivazione principale.", "KeyLayer", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+            Profile owner = cfg.SwitcherOwner(vk, p);
+            if (owner != null)
+            {
+                MessageBox.Show(this, "«" + name + "» è già il tasto proprio del profilo «" + owner.Name + "».", "KeyLayer", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+            bool typing = (vk >= 0x30 && vk <= 0x5A) || vk == 0x20 || vk == 0x0D || vk == 0x08 || vk == 0x09 ||
+                          (vk >= 0xBA && vk <= 0xE2) || (vk >= 0x60 && vk <= 0x6F) || (vk >= 0x21 && vk <= 0x28) || vk == 0x2E;
+            bool modifier = vk == 0xA0 || vk == 0xA2 || vk == 0xA4 || vk == 0xA5 || vk == 0x5B || vk == 0x5C || (vk >= 0x10 && vk <= 0x12);
+            if (typing || modifier)
+            {
+                string why = typing ? "si usa per scrivere o per spostarsi nel testo"
+                                    : "si usa spesso per le scorciatoie (su tastiera italiana AltGr serve anche per @ # [ ])";
+                return MessageBox.Show(this, "«" + name + "» " + why + ": usarlo per attivare il layer può dare fastidio.\n\nUsarlo comunque?",
+                    "KeyLayer", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+            }
+            return true;
+        }
+
+        void SetMainSwitcher(int vk)
+        {
+            if (vk != cfg.ToggleVk && !CanUseAsSwitcher(vk, null)) { SelectSwitcher(cbToggle, cfg.ToggleVk); return; }
+            cfg.ToggleVk = vk;
+            cfg.Remap.Remove(vk);
+            kb.State.ToggleVk = vk;
+            SelectSwitcher(cbToggle, vk);
+            Changed();
+            SelectKey(selected);
+            UpdateHint();
+        }
+
+        void OnProfileKeyChosen()
+        {
+            var it = cbProfKey.SelectedItem as Item;
+            if (it == null) return;
+            if (it.Value == OtherKey) CaptureSwitcher(SetProfileSwitcher, LoadProfileSwitcher);
+            else SetProfileSwitcher(it.Value);
+        }
+
+        void SetProfileSwitcher(int vk)
+        {
+            Profile p = cfg.Active;
+            if (vk != 0 && vk != p.KeyVk && !CanUseAsSwitcher(vk, p)) { LoadProfileSwitcher(); return; }
+            p.KeyVk = vk;
+            LoadProfileSwitcher();
+            Changed();
+            SelectKey(selected);
+            UpdateHint();
+        }
+
+        void LoadProfileSwitcher()
+        {
+            Profile p = cfg.Active;
+            SelectSwitcher(cbProfKey, p.KeyVk);
+            bool was = loading;
+            loading = true;
+            foreach (object o in cbProfMode.Items) if (((Item)o).Value == (int)p.KeyMode) cbProfMode.SelectedItem = o;
+            loading = was;
+            cbProfMode.Enabled = p.KeyVk != 0;
+        }
+
         void LoadOptions()
         {
             loading = true;
-            foreach (object o in cbToggle.Items) if (((Item)o).Value == cfg.ToggleVk) cbToggle.SelectedItem = o;
-            if (cbToggle.SelectedItem == null)
-            {
-                var it = new Item(cfg.ToggleVk, KeyNames.Name(cfg.ToggleVk));
-                cbToggle.Items.Add(it);
-                cbToggle.SelectedItem = it;
-            }
+            SelectSwitcher(cbToggle, cfg.ToggleVk);
+            LoadProfileSwitcher();
             foreach (object o in cbPos.Items) if (((Item)o).Code == cfg.Position) cbPos.SelectedItem = o;
             if (cbPos.SelectedItem == null) cbPos.SelectedIndex = 0;
             tbOpacity.Value = Math.Max(tbOpacity.Minimum, Math.Min(tbOpacity.Maximum, cfg.Opacity));
@@ -495,14 +752,18 @@ namespace KeyLayer
             bool has = false;
             Mapping m = null;
             if (vk > 0) has = cfg.Remap.TryGetValue(CurKey, out m);
-            bool isToggle = vk == cfg.ToggleVk;
+            bool isToggle = vk > 0 && cfg.IsSwitcher(vk);
             bool editable = vk > 0 && !isToggle;
 
             if (vk <= 0)
                 lblSel.Text = "Nessun tasto selezionato";
             else
+            {
+                Profile owner = vk == cfg.ToggleVk ? null : cfg.SwitcherOwner(vk, null);
                 lblSel.Text = "Tasto:  " + KeyNames.SourceLabel(CurKey, hkl) + "   (" + KeyNames.SourceName(CurKey) + ")" +
-                              (isToggle ? "\nÈ il tasto di attivazione: non si può rimappare." : "");
+                              (!isToggle ? "" : owner == null ? "\nÈ il tasto di attivazione: non si può rimappare."
+                                                              : "\nAttiva il profilo «" + owner.Name + "»: non si può rimappare.");
+            }
 
             if (has && m.IsSimple)
             {
@@ -528,7 +789,7 @@ namespace KeyLayer
 
         void Assign()
         {
-            if (selected <= 0 || selected == cfg.ToggleVk) return;
+            if (selected <= 0 || cfg.IsSwitcher(selected)) return;
             string label = tbLabel.Text.Trim().Replace("|", "/");
             Mapping m;
             if (tbSeq.Text.Trim().Length > 0)
@@ -637,11 +898,13 @@ namespace KeyLayer
         public void OnProfileChanged()
         {
             RefreshProfiles();
+            LoadProfileSwitcher();
             kb.State.Map = cfg.Remap;
             kb.State.ProfileName = cfg.Active.Name;
             RefreshList();
             SelectKey(selected);
             kb.Invalidate();
+            UpdateHint();
         }
 
         void StartCapture()
@@ -678,9 +941,11 @@ namespace KeyLayer
                 ? " In modalità «tieni premuto», se il primo tasto premuto non è rimappato, " + AppConfig.ToggleName(cfg.ToggleVk) +
                   " funziona normalmente (es. per le maiuscole)."
                 : "";
+            var others = cfg.ProfileGestures();
+            string own = others.Count > 0 ? " Tasti propri dei profili: " + string.Join(", ", others) + "." : "";
             hint.Text = "Clicca un tasto sulla tastiera (oppure «Premi un tasto…») e scegli in cosa trasformarlo. " +
                         "I tasti rimappati sono in giallo e funzionano solo mentre il layer è attivo: " + cfg.GestureText() + "." +
-                        extra + " Le modifiche vengono salvate subito.";
+                        own + extra + " Le modifiche vengono salvate subito.";
         }
 
         public void OnLayerChanged(bool active)
@@ -690,6 +955,7 @@ namespace KeyLayer
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            fitTimer.Dispose();
             engine.CancelCapture();
             base.OnFormClosed(e);
         }

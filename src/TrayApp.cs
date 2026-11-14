@@ -70,6 +70,7 @@ namespace KeyLayer
         readonly Icon icoIdle, icoActive, icoPaused;
         readonly System.Windows.Forms.Timer followTimer = new System.Windows.Forms.Timer { Interval = 150 };
         readonly System.Windows.Forms.Timer holdShowTimer = new System.Windows.Forms.Timer { Interval = HoldShowDelayMs };
+        readonly System.Windows.Forms.Timer hookWatchdog = new System.Windows.Forms.Timer { Interval = 2000 };
         ToolStripMenuItem miLayer, miPause;
         SettingsForm settings;
         OverlayForm overlay;               // exists only while visible
@@ -119,25 +120,50 @@ namespace KeyLayer
             ApplyStickyKeys();
             try { Autostart.RefreshPath(); } catch (Exception) { }
 
+            // Windows may drop the keyboard hook (it does so silently) or swallow key releases while the session is
+            // locked / asleep: re-hook and forget half-finished presses when the user comes back, and keep an eye
+            // on the hook in between.
+            Microsoft.Win32.SystemEvents.SessionSwitch += OnSessionSwitch;
+            Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            hookWatchdog.Tick += delegate { engine.CheckHooks(); };
+            hookWatchdog.Start();
+
             if (!cfg.Existed && !silent) ShowSettings();
             else if (!silent)
                 tray.ShowBalloonTip(4000, "KeyLayer è in esecuzione",
-                    Capitalize(cfg.GestureText()) + " per usare il layer. Clic sull'icona per le impostazioni.", ToolTipIcon.Info);
+                    Capitalize(cfg.GestureText()) + " per usare il layer" +
+                    (cfg.ProfileGestures().Count > 0 ? " (" + string.Join(", ", cfg.ProfileGestures()) + ")" : "") +
+                    ". Clic sull'icona per le impostazioni.", ToolTipIcon.Info);
         }
 
         static string Capitalize(string s) { return s.Length == 0 ? s : char.ToUpper(s[0]) + s.Substring(1); }
 
+        /// <summary>The main switcher serves the selected profile; profiles with their own key get one more each.</summary>
         void ApplyEngineSettings()
         {
             cfg.Remap.Remove(cfg.ToggleVk);
-            engine.Map = new Dictionary<int, Mapping>(cfg.Remap);
-            engine.ToggleVk = cfg.ToggleVk;
+            var keys = new HashSet<int> { cfg.ToggleVk };
+            foreach (Profile p in cfg.Profiles) if (p.KeyVk != 0) keys.Add(p.KeyVk);
+            var list = new List<Switcher> { MakeSwitcher(cfg.ToggleVk, cfg.Mode, cfg.Active, keys) };
+            foreach (Profile p in cfg.Profiles)
+                if (p.KeyVk != 0 && p.KeyVk != cfg.ToggleVk) list.Add(MakeSwitcher(p.KeyVk, p.KeyMode, p, keys));
             engine.DoubleTapMs = cfg.DoubleTapMs;
-            if (engine.Mode != cfg.Mode)
-            {
-                engine.Mode = cfg.Mode;
-                engine.SetActive(false);
-            }
+            engine.Switchers = list.ToArray();
+        }
+
+        static Switcher MakeSwitcher(int vk, ActivationMode mode, Profile p, HashSet<int> switcherKeys)
+        {
+            var map = new Dictionary<int, Mapping>(p.Remap);
+            foreach (int k in switcherKeys) map.Remove(k); // a switcher is never remapped
+            return new Switcher { Vk = vk, Mode = mode, Profile = p.Name, Map = map };
+        }
+
+        /// <summary>"tocca due volte Shift destro · Vim: tieni premuto F9"</summary>
+        string AllGestures()
+        {
+            var l = cfg.ProfileGestures();
+            l.Insert(0, cfg.GestureText());
+            return string.Join(" · ", l);
         }
 
         void ApplyStickyKeys()
@@ -193,13 +219,13 @@ namespace KeyLayer
 
         void UpdateTrayText()
         {
-            string state = !engine.Enabled ? "sospeso" : engine.Active ? "layer ATTIVO" : cfg.GestureText();
-            string t = "KeyLayer – " + cfg.Active.Name + " – " + state;
+            string state = !engine.Enabled ? "sospeso" : engine.Active ? "layer ATTIVO" : AllGestures();
+            string t = "KeyLayer – " + (engine.Active ? engine.ActiveProfile : cfg.Active.Name) + " – " + state;
             tray.Text = t.Length > 63 ? t.Substring(0, 63) : t;
             tray.Icon = !engine.Enabled ? icoPaused : engine.Active ? icoActive : icoIdle;
             if (miLayer != null)
             {
-                miLayer.Text = "Layer attivo  (" + cfg.GestureText() + ")";
+                miLayer.Text = "Layer attivo  (" + cfg.Active.Name + ": " + cfg.GestureText() + ")";
                 miLayer.Checked = engine.Active;
                 miLayer.Enabled = engine.Enabled;
             }
@@ -216,7 +242,9 @@ namespace KeyLayer
             UpdateTrayText();
             if (engine.Active)
             {
-                if (engine.Mode == ActivationMode.Hold) { holdShowTimer.Stop(); holdShowTimer.Start(); }
+                // Hold: wait a moment (a quick Shift+letter must not flash the overlay), unless it is already up
+                // and only the profile changed.
+                if (engine.ActiveIsHold && overlay == null) { holdShowTimer.Stop(); holdShowTimer.Start(); }
                 else ShowOverlayNow();
             }
             else
@@ -292,19 +320,19 @@ namespace KeyLayer
 
             // While Shift / Ctrl are held, show what the keys do with that modifier (e.g. Vim's Shift+G).
             int[] pressed = engine.Pressed;
-            bool holdToggle = cfg.Mode == ActivationMode.Hold;
-            Func<int, bool> held = vk => Array.IndexOf(pressed, vk) >= 0 && !(holdToggle && vk == cfg.ToggleVk);
+            int holdVk = engine.HoldVk;
+            Func<int, bool> held = vk => Array.IndexOf(pressed, vk) >= 0 && vk != holdVk;
             int variant = (held(0xA0) || held(0xA1) ? KeyNames.SrcShift : 0) | (held(0xA2) || held(0xA3) ? KeyNames.SrcCtrl : 0);
 
             var st = new RenderState
             {
-                Map = engine.Map,
+                Map = engine.ActiveMap,
                 Pressed = pressed,
-                ToggleVk = cfg.ToggleVk,
+                ToggleVk = engine.ActiveVk,
                 LayerActive = true,
                 Hkl = overlayHkl,
                 Variant = variant,
-                ProfileName = cfg.Active.Name,
+                ProfileName = engine.ActiveProfile ?? cfg.Active.Name,
             };
             using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
             {
@@ -385,8 +413,25 @@ namespace KeyLayer
             }
         }
 
+        void OnSessionSwitch(object sender, Microsoft.Win32.SessionSwitchEventArgs e)
+        {
+            if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock ||
+                e.Reason == Microsoft.Win32.SessionSwitchReason.ConsoleConnect ||
+                e.Reason == Microsoft.Win32.SessionSwitchReason.RemoteConnect ||
+                e.Reason == Microsoft.Win32.SessionSwitchReason.SessionLogon)
+                engine.Reinstall();
+        }
+
+        void OnPowerModeChanged(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
+        {
+            if (e.Mode == Microsoft.Win32.PowerModes.Resume) engine.Reinstall();
+        }
+
         void Exit()
         {
+            Microsoft.Win32.SystemEvents.SessionSwitch -= OnSessionSwitch;
+            Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            hookWatchdog.Stop();
             engine.Dispose();
             AccessibilityGuard.Restore();
             followTimer.Stop();

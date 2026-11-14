@@ -18,6 +18,23 @@ Rimappatura dei tasti "a layer" per Windows, in stile Vim. Programma **portable*
 
 Un "tocco" vale solo se Shift destro viene premuto **da solo**: Shift+tasto e Shift+clic non contano. L'intervallo del doppio tocco si regola nel file ini (`DoubleTapMs`, predefinito 400 ms).
 
+### Tasti di attivazione
+
+Il **tasto principale** (Impostazioni → Opzioni) attiva il profilo selezionato. Oltre a Shift destro puoi scegliere Ctrl destro, Bloc Maiusc, Menu, Bloc Scorr, Pausa, Ins, **F1–F24**, oppure **«Altro tasto…»** e premere quello che vuoi.
+
+Ogni profilo può avere anche un **tasto proprio** (riquadro Profili → «Tasto proprio»), con la sua modalità. Quel tasto attiva direttamente il profilo, qualunque sia quello selezionato. Per esempio:
+
+| Tasto | Modalità | Effetto |
+|---|---|---|
+| Shift destro | doppio tocco | accende / spegne il profilo selezionato (es. Personale) |
+| F9 | tieni premuto | Vim attivo finché tieni premuto F9 |
+| Bloc Maiusc | doppio tocco | accende / spegne un terzo profilo |
+
+- Con un layer acceso, il tasto di un altro profilo passa a quel profilo. Se è in modalità «tieni premuto», al rilascio torni al layer di prima.
+- I tasti che non sono modificatori (F1–F24, Bloc Maiusc, Ins…) **mantengono la loro funzione**: un tocco singolo che non completa il gesto viene ripetuto normalmente. Nel doppio tocco arriva con un ritardo di circa 0,4 s; nel «tieni premuto» arriva se lo rilasci subito senza premere altro. Se premi un altro tasto insieme, si comporta come un tasto normale.
+- Molti portatili hanno i tasti F «invertiti» (volume, luminosità…): in quel caso F9 si ottiene con **Fn+F9**, oppure attivando il blocco Fn.
+- Un tasto di attivazione non si può rimappare, e ogni tasto può attivare un solo profilo.
+
 ### Posizione dell'overlay
 
 Con **Automatica** (predefinita) l'overlay compare sul monitor dove si trova il puntatore del mouse, lontano da esso:
@@ -86,7 +103,7 @@ Le scorciatoie dipendono dall'applicazione: Ctrl+F e F3 funzionano nella maggior
 
 Fai clic sull'icona nella barra delle applicazioni (oppure riavvia l'exe mentre è già in esecuzione):
 
-- **Profilo**: scegli il profilo da modificare e usare, caricane uno pronto, oppure creane uno nuovo, rinominalo, eliminalo o svuotalo;
+- **Profilo**: scegli il profilo da modificare e usare, caricane uno pronto, oppure creane uno nuovo, rinominalo, eliminalo o svuotalo. Con **«Tasto proprio»** gli assegni un tasto e una modalità che lo attivano direttamente;
 - clicca un tasto sulla tastiera disegnata, oppure usa **«Premi un tasto…»**;
 - scegli la variante: **da solo**, **con Shift** o **con Ctrl**. Per esempio `G` e `Shift+G` possono fare cose diverse. Con la variante selezionata, la tastiera mostra le mappature di quella variante;
 - scegli dal menu a tendina «Diventa» in cosa trasformarlo (frecce, Home/Fine, PagSu/PagGiù, Canc, Esc, tasti multimediali, lettere, F1-F24, «Esci dal layer», …) e, se vuoi, aggiungi i modificatori Ctrl/Shift/Alt/Win (es. `Y` → `Ctrl+←` per saltare di una parola);
@@ -94,6 +111,8 @@ Fai clic sull'icona nella barra delle applicazioni (oppure riavvia l'exe mentre 
 - facoltativo: un'**etichetta** breve da mostrare sul tasto nell'overlay (es. «undo»);
 - premi **Assegna**. «Nessuno» disattiva il tasto mentre il layer è attivo;
 - opzioni: tasto di attivazione, modalità, posizione, opacità e dimensione dell'overlay, avvio con Windows.
+
+La finestra si può ridimensionare e massimizzare: la tastiera disegnata segue la larghezza, l'elenco delle rimappature usa l'altezza in più e, se la finestra è abbastanza larga, le Opzioni si spostano accanto alla tastiera. Se è più piccola del contenuto, compaiono le barre di scorrimento.
 
 Le modifiche si salvano subito in `KeyLayer.ini`, accanto all'exe. Il file è di testo e si può modificare anche a mano (con l'app chiusa):
 
@@ -120,13 +139,15 @@ M=End
 Y=Ctrl+Left
 
 [Profile:Vim]
+@Key=F9
+@Mode=Hold
 G=Ctrl+Home | doc↑
 Shift+G=Ctrl+End | doc↓
 D=Home, Shift+Down, Ctrl+X | taglia
 O=End, Enter, LayerOff | riga↓
 ```
 
-Sintassi di una riga: `Tasto=Destinazione | etichetta`. Il tasto può avere il prefisso `Shift+` o `Ctrl+` (variante). La destinazione è un tasto con eventuali modificatori, oppure una sequenza separata da virgole. I file creati con le versioni precedenti, con la sezione `[Remap]`, vengono letti come profilo «Personale».
+Sintassi di una riga: `Tasto=Destinazione | etichetta`. Il tasto può avere il prefisso `Shift+` o `Ctrl+` (variante). La destinazione è un tasto con eventuali modificatori, oppure una sequenza separata da virgole. `@Key` e `@Mode` (`Hold`, `DoubleTap` o `SingleTap`) impostano il tasto proprio del profilo. I file creati con le versioni precedenti, con la sezione `[Remap]`, vengono letti come profilo «Personale».
 
 ## Note
 

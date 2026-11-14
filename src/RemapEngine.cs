@@ -8,18 +8,36 @@ namespace KeyLayer
 {
     internal enum ActivationMode
     {
-        SingleTap = 0,  // one tap of the toggle key switches the layer
+        SingleTap = 0,  // one tap of the switcher key switches the layer
         DoubleTap = 1,  // two quick taps switch the layer
-        Hold = 2,       // layer active only while the toggle key is held
+        Hold = 2,       // layer active only while the switcher key is held
+    }
+
+    /// <summary>A key that switches a profile's layer on, with its gesture.</summary>
+    internal sealed class Switcher
+    {
+        public int Vk;
+        public ActivationMode Mode;
+        public string Profile;
+        public Dictionary<int, Mapping> Map;
     }
 
     /// <summary>
     /// Low-level keyboard/mouse hooks on a dedicated high-priority thread (a busy UI never lags the keyboard).
-    /// Handles the toggle gesture and, while the layer is on, swallows remapped keys and injects their targets.
+    /// Handles the switcher gestures and, while a layer is on, swallows remapped keys and injects their targets.
+    ///
+    /// Switchers that are modifiers (Shift, Ctrl) keep working normally in the tap modes. Any other switcher
+    /// (F-keys, Caps Lock, Ins…) is held back: a lone tap that does not complete the gesture is replayed, so
+    /// the key still does its normal job.
     /// </summary>
     internal sealed class RemapEngine : IDisposable
     {
         static readonly IntPtr Signature = new IntPtr(0x4B4C5952); // marks our own injected input
+        const int WM_APP_TAPTIMEOUT = 0x8000 + 0x4B;
+        const int WM_APP_REHOOK = 0x8000 + 0x4C;
+        const uint StaleMs = 1200;      // a key "held" longer than this without any event was released without us seeing it
+        const uint TapMaxMs = 600;      // a press longer than this is not a tap
+        const uint HoldTapMaxMs = 400;  // hold mode, non-modifier switcher: a press shorter than this alone is a plain tap
 
         sealed class Held
         {
@@ -34,62 +52,130 @@ namespace KeyLayer
         volatile uint threadId;
         IntPtr kbHook, msHook;
         Native.HookProc kbProc, msProc; // kept alive against GC
+        Timer tapTimer;
 
-        volatile Dictionary<int, Mapping> map = new Dictionary<int, Mapping>();
-        volatile int toggleVk = 0xA1;
-        volatile int mode = (int)ActivationMode.DoubleTap;
+        static readonly Dictionary<int, Mapping> Empty = new Dictionary<int, Mapping>();
+        volatile Switcher[] switchers = new Switcher[0];
+        volatile Switcher current;          // the switcher whose layer is on; null = layer off
+        volatile bool activeByHold;
+        volatile Switcher holdPrev;         // layer to go back to when a hold ends
         volatile int doubleTapMs = 400;
         volatile bool enabled = true;
-        volatile bool active;
         volatile int[] pressedSnapshot = new int[0];
+        volatile int holdVkPublic;
         Action<int> capture;
+
+        volatile int lastHookTick = Environment.TickCount;   // last time a hook saw any input
+        int lastRehookTick = Environment.TickCount;
 
         // ---- hook-thread-only state ----
         readonly Dictionary<int, Held> held = new Dictionary<int, Held>();
         readonly HashSet<int> pressed = new HashSet<int>();
+        readonly Dictionary<int, uint> lastDown = new Dictionary<int, uint>();
         readonly HashSet<int> swallowUp = new HashSet<int>();
-        // tap modes
-        bool toggleDown, toggleDirty, lastTapValid;
-        uint toggleTime, lastTapTime;
-        // hold mode: the first other key decides whether this hold is "layer" or plain "shift"
+        // modifier switcher, tap modes (the key itself passes through)
+        bool modTapDown, modTapDirty;
+        int modTapVk;
+        uint modTapTime;
+        bool lastTapValid;
+        int lastTapVk;
+        uint lastTapTime;
+        // non-modifier switcher, tap modes (the key is held back)
+        bool ntDown, ntPass, ntMouse;
+        int ntVk;
+        uint ntTime, ntScan;
+        bool ntExt;
+        int pendingVk;                      // a lone first tap waiting for the second one
+        uint pendingUpTime, pendingScan;
+        bool pendingExt;
+        volatile int tapGen;
+        // hold mode: the first other key decides whether this hold is "layer" or the plain key
         const int HoldUndecided = 0, HoldLayer = 1, HoldPlain = 2;
-        bool holdDown, holdInjectedToggle;
-        int holdDecision;
+        bool holdDown, holdIsMod, holdInjected, holdExt;
+        int holdVk, holdDecision;
+        uint holdTime, holdScan;
 
         /// <summary>Raised on the hook thread or the caller's thread: handlers must marshal to the UI.</summary>
         public event EventHandler ActiveChanged;
         public event EventHandler PressedChanged;
 
-        /// <summary>Replace the whole dictionary; never mutate one that was handed over.</summary>
-        public Dictionary<int, Mapping> Map
+        /// <summary>Index 0 is the main switcher (it serves «Layer attivo» in the menu). Replace, never mutate.</summary>
+        public Switcher[] Switchers
         {
-            get { return map; }
-            set { map = value ?? new Dictionary<int, Mapping>(); }
+            get { return switchers; }
+            set
+            {
+                switchers = value ?? new Switcher[0];
+                Switcher cur = current;
+                if (cur == null) return;
+                Switcher match = null;
+                foreach (Switcher s in switchers)
+                    if (s.Vk == cur.Vk && s.Mode == cur.Mode) match = s; // same key and gesture: stays on (maybe with a new profile)
+                if (match == null) { Deactivate(); return; }
+                lock (sync) { if (current == cur) current = match; }
+                Switcher prev = holdPrev;
+                if (prev != null)
+                {
+                    Switcher pm = null;
+                    foreach (Switcher s in switchers) if (s.Vk == prev.Vk && s.Mode == prev.Mode) pm = s;
+                    holdPrev = pm;
+                }
+            }
         }
 
-        public int ToggleVk { get { return toggleVk; } set { toggleVk = value; } }
-        public ActivationMode Mode { get { return (ActivationMode)mode; } set { mode = (int)value; } }
         public int DoubleTapMs { get { return doubleTapMs; } set { doubleTapMs = value; } }
-        public bool Active { get { return active; } }
+        public bool Active { get { return current != null; } }
+        public bool ActiveIsHold { get { return current != null && activeByHold; } }
+        public string ActiveProfile { get { Switcher c = current; return c != null ? c.Profile : null; } }
+        public int ActiveVk { get { Switcher c = current; return c != null ? c.Vk : 0; } }
+        public Dictionary<int, Mapping> ActiveMap { get { Switcher c = current; return c != null && c.Map != null ? c.Map : Empty; } }
         public int[] Pressed { get { return pressedSnapshot; } }
+        /// <summary>The hold-mode switcher being held right now (it is not a "real" Shift / Ctrl), or 0.</summary>
+        public int HoldVk { get { return holdVkPublic; } }
 
         public bool Enabled
         {
             get { return enabled; }
-            set { enabled = value; if (!value) SetActive(false); }
+            set { enabled = value; if (!value) Deactivate(); }
         }
 
         /// <summary>The next physical key press is swallowed and reported to the callback (on the hook thread).</summary>
         public void BeginCapture(Action<int> callback) { Interlocked.Exchange(ref capture, callback); }
         public void CancelCapture() { Interlocked.Exchange(ref capture, null); }
 
+        /// <summary>From the menu / settings: on = the main switcher's layer (selected profile).</summary>
         public void SetActive(bool value)
+        {
+            if (!value) { Deactivate(); return; }
+            Switcher[] sw = switchers;
+            if (sw.Length > 0) Activate(sw[0], false);
+        }
+
+        void Activate(Switcher s, bool byHold)
         {
             lock (sync)
             {
-                if (active == value) return;
-                active = value;
+                if (current == s && activeByHold == byHold) return;
+                current = s;
+                activeByHold = byHold;
             }
+            RaiseActiveChanged();
+        }
+
+        void Deactivate()
+        {
+            lock (sync)
+            {
+                holdPrev = null;
+                if (current == null) return;
+                current = null;
+                activeByHold = false;
+            }
+            RaiseActiveChanged();
+        }
+
+        void RaiseActiveChanged()
+        {
             EventHandler h = ActiveChanged;
             if (h != null) h(this, EventArgs.Empty);
         }
@@ -114,14 +200,29 @@ namespace KeyLayer
                     return;
                 }
                 msHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, msProc, hMod, 0);
+                tapTimer = new Timer(delegate (object gen)
+                {
+                    Native.PostThreadMessage(threadId, WM_APP_TAPTIMEOUT, (IntPtr)tapGen, IntPtr.Zero);
+                }, null, Timeout.Infinite, Timeout.Infinite);
                 ready.Set();
 
                 while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
                 {
+                    if (msg.hwnd == IntPtr.Zero && msg.message == WM_APP_TAPTIMEOUT)
+                    {
+                        if (msg.wParam.ToInt32() == tapGen) OnPendingTimeout();
+                        continue;
+                    }
+                    if (msg.hwnd == IntPtr.Zero && msg.message == WM_APP_REHOOK)
+                    {
+                        Rehook();
+                        continue;
+                    }
                     Native.TranslateMessage(ref msg);
                     Native.DispatchMessage(ref msg);
                 }
 
+                tapTimer.Dispose();
                 ReleaseAll();
                 Native.UnhookWindowsHookEx(kbHook);
                 if (msHook != IntPtr.Zero) Native.UnhookWindowsHookEx(msHook);
@@ -132,6 +233,110 @@ namespace KeyLayer
             thread.Start();
             ready.WaitOne();
             if (error != null) throw error;
+        }
+
+        /// <summary>
+        /// Puts the hooks back and forgets every half-finished key press. For when Windows may have dropped the
+        /// hooks or swallowed key releases: unlock, resume from sleep, or input that never reached us.
+        /// </summary>
+        public void Reinstall()
+        {
+            if (threadId != 0) Native.PostThreadMessage(threadId, WM_APP_REHOOK, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        /// <summary>
+        /// Watchdog (call every few seconds): Windows silently removes a low-level hook that it judges too slow.
+        /// If there was input the hooks never saw, reinstall them.
+        /// </summary>
+        public void CheckHooks()
+        {
+            uint lastInput = Native.LastInputTick();
+            if (lastInput == 0) return;
+            int unseen = unchecked((int)(lastInput - (uint)lastHookTick));
+            int sinceRehook = unchecked(Environment.TickCount - lastRehookTick);
+            if (unseen > 1500 && sinceRehook > 5000) Reinstall();
+        }
+
+        void Rehook()
+        {
+            lastRehookTick = Environment.TickCount;
+            ResetState();
+            IntPtr hMod = Native.GetModuleHandle(null);
+            if (kbHook != IntPtr.Zero) Native.UnhookWindowsHookEx(kbHook);
+            if (msHook != IntPtr.Zero) Native.UnhookWindowsHookEx(msHook);
+            kbHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, kbProc, hMod, 0);
+            msHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, msProc, hMod, 0);
+            lastHookTick = Environment.TickCount;
+        }
+
+        /// <summary>Releases whatever we hold down and forgets all key-press state (the layer itself stays as it is).</summary>
+        void ResetState()
+        {
+            ReleaseAll();
+            if (holdDown)
+            {
+                holdDown = false;
+                holdVkPublic = 0;
+                if (holdDecision != HoldPlain) EndHoldLayer();
+            }
+            ntDown = false;
+            modTapDown = false;
+            lastTapValid = false;
+            pendingVk = 0;
+            tapGen++;
+            pressed.Clear();
+            pressedSnapshot = new int[0];
+            swallowUp.Clear();
+            lastDown.Clear();
+        }
+
+        /// <summary>
+        /// A fresh press of a key we believed still down: its release was lost (secure desktop, elevated window…).
+        /// Finish what the old press started, so nothing stays stuck.
+        /// </summary>
+        void RecoverLostRelease(int vk)
+        {
+            Held hd;
+            if (held.TryGetValue(vk, out hd))
+            {
+                held.Remove(vk);
+                var batch = new List<Native.INPUT>();
+                if (hd.M.IsSimple && hd.M.Vk != 0) AddKey(batch, hd.M.Vk, true);
+                for (int i = hd.Mods.Count - 1; i >= 0; i--) AddKey(batch, hd.Mods[i], true);
+                Flush(batch);
+            }
+            if (holdDown && holdVk == vk)
+            {
+                holdDown = false;
+                holdVkPublic = 0;
+                if (holdInjected) { Send(holdVk, true); holdInjected = false; }
+                if (holdDecision != HoldPlain) EndHoldLayer();
+            }
+            if (ntDown && ntVk == vk) ntDown = false;
+            if (modTapDown && modTapVk == vk) modTapDown = false;
+            swallowUp.Remove(vk);
+        }
+
+        /// <summary>
+        /// Forgets keys we think are down but Windows says are up (their release happened where we could not see it).
+        /// Only for keys whose events reach Windows: the ones we swallow have no reliable system state.
+        /// </summary>
+        void PruneStaleKeys(int except)
+        {
+            List<int> gone = null;
+            foreach (int p in pressed)
+            {
+                if (p == except || held.ContainsKey(p) || (holdDown && p == holdVk) || (ntDown && !ntPass && p == ntVk)) continue;
+                if ((Native.GetAsyncKeyState(p) & 0x8000) != 0) continue;
+                if (gone == null) gone = new List<int>();
+                gone.Add(p);
+            }
+            if (gone == null) return;
+            foreach (int p in gone)
+            {
+                pressed.Remove(p);
+                if (modTapDown && modTapVk == p) modTapDown = false;
+            }
         }
 
         public void Dispose()
@@ -147,10 +352,17 @@ namespace KeyLayer
             return (vk >= 0x10 && vk <= 0x12) || (vk >= 0xA0 && vk <= 0xA5) || vk == 0x5B || vk == 0x5C;
         }
 
+        Switcher FindSwitcher(int vk)
+        {
+            foreach (Switcher s in switchers) if (s.Vk == vk) return s;
+            return null;
+        }
+
         // ------------------------------------------------------------------ mouse
 
         IntPtr MouseProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            lastHookTick = Environment.TickCount;
             if (nCode >= 0)
             {
                 int m = wParam.ToInt32();
@@ -161,12 +373,14 @@ namespace KeyLayer
                     var ms = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
                     if (ms.dwExtraInfo != Signature)
                     {
-                        // Shift+click / Shift+wheel is not a tap of the toggle key.
-                        if (toggleDown) toggleDirty = true;
+                        // Shift+click / Shift+wheel is not a tap of the switcher.
+                        if (modTapDown) modTapDirty = true;
+                        if (ntDown) ntMouse = true;
                         lastTapValid = false;
+                        FlushPendingTap();
 
-                        // Hold mode: a click before any key means the user wants a plain Shift+click.
-                        if (holdDown && holdDecision == HoldUndecided)
+                        // Hold mode with a modifier: a click before any key means the user wants a plain Shift+click.
+                        if (holdDown && holdIsMod && holdDecision == HoldUndecided)
                         {
                             BecomePlainHold();
                             ReinjectMouse(m, ms.mouseData);
@@ -200,17 +414,9 @@ namespace KeyLayer
 
         // ------------------------------------------------------------------ keyboard
 
-        /// <summary>Hold mode, first event is not a remapped key: behave like the normal key (e.g. Shift for capitals).</summary>
-        void BecomePlainHold()
-        {
-            holdDecision = HoldPlain;
-            SetActive(false);
-            Send(toggleVk, false);
-            holdInjectedToggle = true;
-        }
-
         IntPtr KeyboardProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            lastHookTick = Environment.TickCount;
             if (nCode < 0) return Native.CallNextHookEx(kbHook, nCode, wParam, lParam);
 
             var k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
@@ -220,6 +426,23 @@ namespace KeyLayer
             bool down = msg == Native.WM_KEYDOWN || msg == Native.WM_SYSKEYDOWN;
             bool up = msg == Native.WM_KEYUP || msg == Native.WM_SYSKEYUP;
             int vk = (int)k.vkCode;
+            bool ext = (k.flags & 1) != 0;
+
+            if (down)
+            {
+                // A down of a key we think is already down is normally auto-repeat. If nothing came from it for a
+                // long time, though, its release was lost: recover before handling this new press.
+                uint last;
+                bool wasDown = pressed.Contains(vk);
+                if (wasDown && lastDown.TryGetValue(vk, out last) && unchecked(k.time - last) > StaleMs)
+                {
+                    RecoverLostRelease(vk);
+                    pressed.Remove(vk);
+                    wasDown = false;
+                }
+                lastDown[vk] = k.time;
+                if (!wasDown) PruneStaleKeys(vk);
+            }
 
             // Track physically pressed keys (overlay highlight)
             bool changed = down ? pressed.Add(vk) : (up && pressed.Remove(vk));
@@ -228,7 +451,7 @@ namespace KeyLayer
                 var arr = new int[pressed.Count];
                 pressed.CopyTo(arr);
                 pressedSnapshot = arr;
-                if (active)
+                if (current != null)
                 {
                     EventHandler h = PressedChanged;
                     if (h != null) h(this, EventArgs.Empty);
@@ -236,7 +459,7 @@ namespace KeyLayer
             }
 
             // Key capture for the settings window
-            if (down && !held.ContainsKey(vk) && !(vk == toggleVk && holdDown))
+            if (down && !held.ContainsKey(vk) && !(holdDown && vk == holdVk) && !(ntDown && vk == ntVk))
             {
                 Action<int> cb = Interlocked.Exchange(ref capture, null);
                 if (cb != null)
@@ -252,46 +475,45 @@ namespace KeyLayer
                 return (IntPtr)1;
             }
 
-            // ---- the toggle key ----
-            if (vk == toggleVk && !held.ContainsKey(vk))
-            {
-                if (((ActivationMode)mode == ActivationMode.Hold && enabled) || holdDown) // finish a hold even if the mode changed meanwhile
-                    return HoldToggleKey(down, up);
+            // ---- switcher presses in progress (finished even if the settings changed meanwhile) ----
+            if (holdDown && vk == holdVk) return HoldKey(down, up, k.time);
+            if (ntDown && vk == ntVk) return NonModTapKey(nCode, wParam, lParam, down, up, k.time);
+            if (up && modTapDown && vk == modTapVk) ModTapUp(k.time);
 
-                if (down)
+            // ---- a switcher key goes down ----
+            Switcher sw = down && enabled && !held.ContainsKey(vk) ? FindSwitcher(vk) : null;
+            if (sw != null)
+            {
+                if (sw.Mode == ActivationMode.Hold)
                 {
-                    if (!toggleDown) { toggleDown = true; toggleDirty = false; toggleTime = k.time; }
+                    if (!holdDown) return StartHold(sw, k);
+                    // a second hold switcher while one is held: just an ordinary key
                 }
-                else if (up)
+                else if (IsModifier(vk))
                 {
-                    bool tap = toggleDown && !toggleDirty && unchecked(k.time - toggleTime) < 600;
-                    toggleDown = false;
-                    if (tap && enabled)
+                    if (!modTapDown || modTapVk != vk)
                     {
-                        if ((ActivationMode)mode == ActivationMode.SingleTap)
-                        {
-                            SetActive(!active);
-                        }
-                        else if (lastTapValid && unchecked(toggleTime - lastTapTime) <= (uint)doubleTapMs)
-                        {
-                            lastTapValid = false;
-                            SetActive(!active);
-                        }
-                        else
-                        {
-                            lastTapValid = true;
-                            lastTapTime = k.time;
-                        }
+                        if (pendingVk != 0) return ReplayFirst(k, down);
+                        modTapDown = true; modTapDirty = false; modTapVk = vk; modTapTime = k.time;
                     }
-                    else lastTapValid = false;
+                    return Native.CallNextHookEx(kbHook, nCode, wParam, lParam); // Shift / Ctrl keep working normally
                 }
-                return Native.CallNextHookEx(kbHook, nCode, wParam, lParam); // the toggle key keeps working normally
+                else
+                {
+                    if (pendingVk != 0 && pendingVk != vk) FlushPendingTap();
+                    ntDown = true; ntPass = false; ntMouse = false;
+                    ntVk = vk; ntTime = k.time; ntScan = k.scanCode; ntExt = ext;
+                    return (IntPtr)1; // held back until we know whether this is a tap
+                }
             }
 
             if (down)
             {
-                if (toggleDown) toggleDirty = true;
+                if (modTapDown) modTapDirty = true;
                 lastTapValid = false;
+
+                // A held-back switcher key must reach the apps before this key: send it first, then this key again.
+                if (pendingVk != 0 || (ntDown && !ntPass)) return ReplayFirst(k, down);
 
                 // Hold mode: the first non-modifier key decides what this hold means.
                 if (holdDown && holdDecision == HoldUndecided && !IsModifier(vk))
@@ -301,8 +523,11 @@ namespace KeyLayer
                     else
                     {
                         BecomePlainHold();
-                        SendScan(vk, k.scanCode, (k.flags & 1) != 0, false); // re-inject after the Shift
-                        return (IntPtr)1;
+                        if (holdIsMod)
+                        {
+                            SendScan(vk, k.scanCode, ext, false); // re-inject after the Shift
+                            return (IntPtr)1;
+                        }
                     }
                 }
             }
@@ -321,7 +546,7 @@ namespace KeyLayer
                 }
                 Mapping m;
                 int variant;
-                if (active && enabled && Lookup(vk, out m, out variant))
+                if (current != null && enabled && Lookup(vk, out m, out variant))
                 {
                     hd = new Held { M = m };
                     foreach (KeyStroke s in m.Steps) if (s.Vk == KeyNames.LayerOff) hd.HasLayerOff = true;
@@ -357,16 +582,201 @@ namespace KeyLayer
             return Native.CallNextHookEx(kbHook, nCode, wParam, lParam);
         }
 
-        /// <summary>Physically held, and not the toggle key that hold mode swallows.</summary>
+        /// <summary>
+        /// Sends what must precede the current key (a pending tap, a held-back switcher), then the current key
+        /// itself without our signature, so the hook sees it again in the right order with the state settled.
+        /// </summary>
+        IntPtr ReplayFirst(Native.KBDLLHOOKSTRUCT k, bool down)
+        {
+            var batch = new List<Native.INPUT>();
+            if (pendingVk != 0)
+            {
+                batch.Add(MakeKey(pendingVk, pendingScan, pendingExt, false, true));
+                batch.Add(MakeKey(pendingVk, pendingScan, pendingExt, true, true));
+                pendingVk = 0;
+            }
+            if (ntDown && !ntPass)
+            {
+                batch.Add(MakeKey(ntVk, ntScan, ntExt, false, true));
+                ntPass = true;
+            }
+            pressed.Remove((int)k.vkCode); // it comes back with the replay
+            batch.Add(MakeKey((int)k.vkCode, k.scanCode, (k.flags & 1) != 0, !down, false));
+            Flush(batch);
+            return (IntPtr)1;
+        }
+
+        // ---- modifier switcher, tap modes ----
+
+        void ModTapUp(uint time)
+        {
+            bool tap = !modTapDirty && unchecked(time - modTapTime) < TapMaxMs;
+            modTapDown = false;
+            Switcher sw = enabled ? FindSwitcher(modTapVk) : null;
+            if (tap && sw != null && sw.Mode != ActivationMode.Hold) OnTap(sw, modTapTime, time);
+            else lastTapValid = false;
+        }
+
+        /// <summary>A clean tap of a tap-mode switcher: single tap switches, double tap needs a second one soon.</summary>
+        void OnTap(Switcher sw, uint downTime, uint upTime)
+        {
+            if (sw.Mode == ActivationMode.SingleTap) { lastTapValid = false; Toggle(sw); return; }
+            if (lastTapValid && lastTapVk == sw.Vk && unchecked(downTime - lastTapTime) <= (uint)doubleTapMs)
+            {
+                lastTapValid = false;
+                Toggle(sw);
+                return;
+            }
+            lastTapValid = true;
+            lastTapVk = sw.Vk;
+            lastTapTime = upTime;
+        }
+
+        void Toggle(Switcher sw)
+        {
+            Switcher cur = current;
+            if (cur != null && cur.Vk == sw.Vk && !activeByHold) Deactivate();
+            else Activate(sw, false); // off, or another profile's layer: switch to this one
+        }
+
+        // ---- non-modifier switcher, tap modes ----
+
+        IntPtr NonModTapKey(int nCode, IntPtr wParam, IntPtr lParam, bool down, bool up, uint time)
+        {
+            // Already let through (another key was pressed with it): its repeats and release go as they are.
+            if (ntPass)
+            {
+                if (up) ntDown = false;
+                return Native.CallNextHookEx(kbHook, nCode, wParam, lParam);
+            }
+            if (!up) return (IntPtr)1; // auto-repeat while we wait
+            ntDown = false;
+
+            Switcher sw = enabled ? FindSwitcher(ntVk) : null;
+            bool tap = !ntMouse && unchecked(time - ntTime) < TapMaxMs;
+            if (!tap || sw == null || sw.Mode == ActivationMode.Hold)
+            {
+                lastTapValid = false;
+                FlushPendingTap();
+                Replay(ntVk, ntScan, ntExt);
+                return (IntPtr)1;
+            }
+            if (sw.Mode == ActivationMode.SingleTap)
+            {
+                FlushPendingTap();
+                Toggle(sw);
+                return (IntPtr)1;
+            }
+            // double tap
+            if (pendingVk == ntVk && unchecked(ntTime - pendingUpTime) <= (uint)doubleTapMs)
+            {
+                pendingVk = 0;
+                tapGen++;
+                Toggle(sw);
+                return (IntPtr)1;
+            }
+            FlushPendingTap();
+            pendingVk = ntVk; pendingScan = ntScan; pendingExt = ntExt; pendingUpTime = time;
+            tapGen++;
+            tapTimer.Change(doubleTapMs + 30, Timeout.Infinite);
+            return (IntPtr)1;
+        }
+
+        void OnPendingTimeout()
+        {
+            if (pendingVk == 0) return;
+            if (ntDown && ntVk == pendingVk) return; // the second press is in progress: its release decides
+            FlushPendingTap();
+        }
+
+        /// <summary>The lone first tap did not become a double tap: give the key its normal job.</summary>
+        void FlushPendingTap()
+        {
+            if (pendingVk == 0) return;
+            int v = pendingVk;
+            pendingVk = 0;
+            tapGen++;
+            Replay(v, pendingScan, pendingExt);
+        }
+
+        static void Replay(int vk, uint scan, bool ext)
+        {
+            Native.SendInput(2, new[] { MakeKey(vk, scan, ext, false, true), MakeKey(vk, scan, ext, true, true) }, InputSize);
+        }
+
+        // ---- hold mode ----
+
+        IntPtr StartHold(Switcher sw, Native.KBDLLHOOKSTRUCT k)
+        {
+            FlushPendingTap();
+            lastTapValid = false;
+            holdDown = true;
+            holdVk = sw.Vk;
+            holdVkPublic = sw.Vk;
+            holdIsMod = IsModifier(sw.Vk);
+            holdDecision = HoldUndecided;
+            holdInjected = false;
+            holdTime = k.time;
+            holdScan = k.scanCode;
+            holdExt = (k.flags & 1) != 0;
+            Switcher prev = current;
+            bool prevByHold = activeByHold;
+            Activate(sw, true);
+            holdPrev = prev != null && !prevByHold ? prev : null;
+            return (IntPtr)1;
+        }
+
+        /// <summary>Hold mode, the first key is not remapped: the switcher is just its normal key (e.g. Shift for capitals).</summary>
+        void BecomePlainHold()
+        {
+            holdDecision = HoldPlain;
+            EndHoldLayer();
+            if (holdIsMod)
+            {
+                Send(holdVk, false);
+                holdInjected = true;
+            }
+        }
+
+        /// <summary>The hold's layer ends: back to the layer that was on before it, if any.</summary>
+        void EndHoldLayer()
+        {
+            Switcher prev = holdPrev;
+            holdPrev = null;
+            if (current == null) return; // switched off meanwhile (e.g. LayerOff)
+            if (prev != null) Activate(prev, false);
+            else Deactivate();
+        }
+
+        IntPtr HoldKey(bool down, bool up, uint time)
+        {
+            if (down) return (IntPtr)1; // auto-repeat
+            if (!up) return (IntPtr)1;
+            holdDown = false;
+            holdVkPublic = 0;
+            if (holdInjected) { Send(holdVk, true); holdInjected = false; }
+            else if (!holdIsMod && holdDecision == HoldUndecided && unchecked(time - holdTime) < HoldTapMaxMs)
+            {
+                EndHoldLayer();
+                Replay(holdVk, holdScan, holdExt); // a quick tap alone: the key's normal job
+                return (IntPtr)1;
+            }
+            if (holdDecision != HoldPlain) EndHoldLayer();
+            return (IntPtr)1;
+        }
+
+        // ---- lookups and injection ----
+
+        /// <summary>Physically held, and not the hold-mode switcher that is swallowed.</summary>
         bool PhysicallyHeld(int vk)
         {
-            return pressed.Contains(vk) && !((ActivationMode)mode == ActivationMode.Hold && vk == toggleVk);
+            return pressed.Contains(vk) && !(holdDown && vk == holdVk);
         }
 
         /// <summary>Finds the mapping for a key: the Shift/Ctrl variant matching the held modifiers first, then the plain key.</summary>
         bool Lookup(int vk, out Mapping m, out int variant)
         {
-            Dictionary<int, Mapping> mp = map;
+            Dictionary<int, Mapping> mp = ActiveMap;
             int f = 0;
             if (PhysicallyHeld(0xA0) || PhysicallyHeld(0xA1)) f |= KeyNames.SrcShift;
             if (PhysicallyHeld(0xA2) || PhysicallyHeld(0xA3)) f |= KeyNames.SrcCtrl;
@@ -404,7 +814,7 @@ namespace KeyLayer
                 if (s.Vk == KeyNames.LayerOff)
                 {
                     Flush(batch);
-                    SetActive(false);
+                    Deactivate();
                     continue;
                 }
                 var mods = new List<int>();
@@ -413,31 +823,6 @@ namespace KeyLayer
                 for (int i = mods.Count - 1; i >= 0; i--) AddKey(batch, mods[i], true);
             }
             Flush(batch);
-        }
-
-        /// <summary>Hold mode: the toggle key is swallowed; the layer lives while it is held.</summary>
-        IntPtr HoldToggleKey(bool down, bool up)
-        {
-            if (down)
-            {
-                if (!holdDown)
-                {
-                    holdDown = true;
-                    holdDecision = HoldUndecided;
-                    holdInjectedToggle = false;
-                    SetActive(true);
-                }
-                return (IntPtr)1; // also swallows auto-repeat
-            }
-            if (up && holdDown)
-            {
-                holdDown = false;
-                if (holdInjectedToggle) Send(toggleVk, true);
-                holdInjectedToggle = false;
-                SetActive(false);
-                return (IntPtr)1;
-            }
-            return (IntPtr)1;
         }
 
         void ReleaseAll()
@@ -449,13 +834,14 @@ namespace KeyLayer
                 for (int i = hd.Mods.Count - 1; i >= 0; i--) AddKey(batch, hd.Mods[i], true);
             }
             held.Clear();
-            if (holdInjectedToggle) { AddKey(batch, toggleVk, true); holdInjectedToggle = false; }
+            if (holdInjected) { AddKey(batch, holdVk, true); holdInjected = false; }
+            if (ntDown && ntPass) { AddKey(batch, ntVk, true); ntDown = false; }
             Flush(batch);
         }
 
         static readonly int InputSize = Marshal.SizeOf(typeof(Native.INPUT));
 
-        static Native.INPUT MakeKey(int vk, uint scan, bool extended, bool keyUp)
+        static Native.INPUT MakeKey(int vk, uint scan, bool extended, bool keyUp, bool signed = true)
         {
             var inp = new Native.INPUT();
             inp.type = Native.INPUT_KEYBOARD;
@@ -464,7 +850,7 @@ namespace KeyLayer
             uint flags = keyUp ? Native.KEYEVENTF_KEYUP : 0;
             if (extended) flags |= Native.KEYEVENTF_EXTENDEDKEY;
             inp.u.ki.dwFlags = flags;
-            inp.u.ki.dwExtraInfo = Signature;
+            inp.u.ki.dwExtraInfo = signed ? Signature : IntPtr.Zero;
             return inp;
         }
 

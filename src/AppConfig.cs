@@ -13,6 +13,9 @@ namespace KeyLayer
     {
         public string Name;
         public readonly Dictionary<int, Mapping> Remap = new Dictionary<int, Mapping>();
+        /// <summary>Optional switcher of this profile (0 = none): activates it directly, whatever profile is selected.</summary>
+        public int KeyVk;
+        public ActivationMode KeyMode = ActivationMode.Hold;
         public Profile(string name) { Name = name; }
     }
 
@@ -125,7 +128,12 @@ namespace KeyLayer
             Profile fresh = ProfileTemplates.Build(templateName);
             fresh.Remap.Remove(ToggleVk);
             Profile existing = Find(templateName);
-            if (existing != null) Profiles[Profiles.IndexOf(existing)] = fresh;
+            if (existing != null)
+            {
+                fresh.KeyVk = existing.KeyVk;     // restoring the mappings keeps the profile's own switcher
+                fresh.KeyMode = existing.KeyMode;
+                Profiles[Profiles.IndexOf(existing)] = fresh;
+            }
             else Profiles.Add(fresh);
             ActiveProfileName = fresh.Name;
             return fresh;
@@ -139,13 +147,27 @@ namespace KeyLayer
         /// <summary>"Tocca due volte Shift destro" etc., for hints and notifications.</summary>
         public string GestureText()
         {
-            string key = ToggleName(ToggleVk);
-            switch (Mode)
+            return GestureText(ToggleVk, Mode);
+        }
+
+        public static string GestureText(int vk, ActivationMode mode)
+        {
+            string key = ToggleName(vk);
+            switch (mode)
             {
                 case ActivationMode.SingleTap: return "tocca " + key;
                 case ActivationMode.Hold: return "tieni premuto " + key;
                 default: return "tocca due volte " + key;
             }
+        }
+
+        /// <summary>The gestures of the profiles that have their own switcher, e.g. "Vim: tieni premuto F9".</summary>
+        public List<string> ProfileGestures()
+        {
+            var l = new List<string>();
+            foreach (Profile p in Profiles)
+                if (p.KeyVk != 0 && p.KeyVk != ToggleVk) l.Add(p.Name + ": " + GestureText(p.KeyVk, p.KeyMode));
+            return l;
         }
 
         public static string ModeName(ActivationMode m)
@@ -158,20 +180,65 @@ namespace KeyLayer
             }
         }
 
-        public static readonly int[] ToggleChoices = { 0xA1, 0xA3, 0x5D, 0x91, 0x13, 0x14 };
+        public static string ModeShortName(ActivationMode m)
+        {
+            switch (m)
+            {
+                case ActivationMode.SingleTap: return "tocco singolo";
+                case ActivationMode.Hold: return "tieni premuto";
+                default: return "doppio tocco";
+            }
+        }
+
+        /// <summary>Keys offered as switchers; any other key can be captured with «Altro tasto…».</summary>
+        public static int[] ToggleChoices
+        {
+            get
+            {
+                var l = new List<int> { 0xA1, 0xA3, 0x14, 0x5D, 0x91, 0x13, 0x2D };
+                for (int f = 0x70; f <= 0x87; f++) l.Add(f); // F1-F24
+                return l.ToArray();
+            }
+        }
 
         public static string ToggleName(int vk)
         {
             switch (vk)
             {
+                case 0xA0: return "Shift sinistro";
                 case 0xA1: return "Shift destro";
+                case 0xA2: return "Ctrl sinistro";
                 case 0xA3: return "Ctrl destro";
                 case 0x5D: return "Menu contestuale";
                 case 0x91: return "Bloc Scorr";
                 case 0x13: return "Pausa";
                 case 0x14: return "Bloc Maiusc";
+                case 0x2D: return "Ins";
             }
             return KeyNames.Name(vk);
+        }
+
+        /// <summary>Profile (other than the one given) whose own switcher is vk, or null.</summary>
+        public Profile SwitcherOwner(int vk, Profile except)
+        {
+            foreach (Profile p in Profiles)
+                if (p != except && p.KeyVk == vk) return p;
+            return null;
+        }
+
+        /// <summary>Is vk a switcher (main or of any profile)? Switchers cannot be remapped.</summary>
+        public bool IsSwitcher(int vk)
+        {
+            return vk == ToggleVk || SwitcherOwner(vk, null) != null;
+        }
+
+        static bool TryParseMode(string val, out ActivationMode m)
+        {
+            m = ActivationMode.DoubleTap;
+            if (val.Equals("SingleTap", StringComparison.OrdinalIgnoreCase)) m = ActivationMode.SingleTap;
+            else if (val.Equals("Hold", StringComparison.OrdinalIgnoreCase)) m = ActivationMode.Hold;
+            else if (!val.Equals("DoubleTap", StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
         }
 
         public static string FilePath
@@ -226,9 +293,8 @@ namespace KeyLayer
                         case "position": c.Position = val; break;
                         case "profile": c.ActiveProfileName = val; break;
                         case "activationmode":
-                            if (val.Equals("SingleTap", StringComparison.OrdinalIgnoreCase)) c.Mode = ActivationMode.SingleTap;
-                            else if (val.Equals("Hold", StringComparison.OrdinalIgnoreCase)) c.Mode = ActivationMode.Hold;
-                            else c.Mode = ActivationMode.DoubleTap;
+                            ActivationMode am;
+                            c.Mode = TryParseMode(val, out am) ? am : ActivationMode.DoubleTap;
                             break;
                         case "doubletapms": c.DoubleTapMs = ParseInt(val, 400, 150, 1000); break;
                         case "disablestickykeys": c.DisableStickyKeys = !(val == "0" || val.Equals("false", StringComparison.OrdinalIgnoreCase)); break;
@@ -236,6 +302,20 @@ namespace KeyLayer
                             int t;
                             if (KeyNames.TryParse(val, out t) && t != 0) c.ToggleVk = t;
                             break;
+                    }
+                }
+                else if (current != null && key.StartsWith("@"))
+                {
+                    // the profile's own switcher:  @Key=F9   @Mode=Hold
+                    if (key.Equals("@Key", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int kv;
+                        current.KeyVk = KeyNames.TryParse(val, out kv) && kv > 0 && kv < 0x100 ? kv : 0;
+                    }
+                    else if (key.Equals("@Mode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ActivationMode km;
+                        if (TryParseMode(val, out km)) current.KeyMode = km;
                     }
                 }
                 else if (current != null)
@@ -247,6 +327,10 @@ namespace KeyLayer
             }
             if (c.Profiles.Count == 0) c.Profiles.Add(new Profile(DefaultProfileName));
             foreach (Profile p in c.Profiles) p.Remap.Remove(c.ToggleVk);
+            // one key, one switcher: the main key wins, then the first profile that claims it
+            var claimed = new HashSet<int> { c.ToggleVk };
+            foreach (Profile p in c.Profiles)
+                if (p.KeyVk != 0 && !claimed.Add(p.KeyVk)) p.KeyVk = 0;
             if (c.Find(c.ActiveProfileName) == null) c.ActiveProfileName = c.Profiles[0].Name;
             return c;
         }
@@ -267,6 +351,7 @@ namespace KeyLayer
             sb.AppendLine(";   Tasto con varianti:  Shift+X, Ctrl+F (valgono solo con quel modificatore premuto)");
             sb.AppendLine(";   Sequenza ed etichetta:  D=Home, Shift+Down, Ctrl+X | dd     O=End, Enter, LayerOff | o");
             sb.AppendLine(";   LayerOff = disattiva il layer (come tornare in insert mode in Vim)");
+            sb.AppendLine(";   @Key=F9 e @Mode=Hold|DoubleTap|SingleTap: tasto proprio del profilo (lo attiva direttamente)");
             sb.AppendLine("; Nomi: A-Z, 0-9, F1-F24, Up, Down, Left, Right, Home, End, PageUp, PageDown, Insert, Delete,");
             sb.AppendLine(";       Backspace, Enter, Escape, Tab, Space, LShift, RShift, LCtrl, RCtrl, LAlt, RAlt, LWin, Apps,");
             sb.AppendLine(";       CapsLock, VolumeUp, VolumeDown, VolumeMute, MediaPlayPause, MediaNext, MediaPrev, OEM_1..OEM_102, VK_xx");
@@ -286,6 +371,11 @@ namespace KeyLayer
             {
                 sb.AppendLine();
                 sb.AppendLine("[Profile:" + p.Name + "]");
+                if (p.KeyVk != 0)
+                {
+                    sb.AppendLine("@Key=" + KeyNames.Name(p.KeyVk));
+                    sb.AppendLine("@Mode=" + p.KeyMode);
+                }
                 foreach (var kv in p.Remap.OrderBy(x => KeyNames.Name(x.Key & 0xFFFF), StringComparer.OrdinalIgnoreCase).ThenBy(x => x.Key))
                     sb.AppendLine(KeyNames.SourceName(kv.Key) + "=" + kv.Value.ToConfig());
             }

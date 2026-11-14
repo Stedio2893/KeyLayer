@@ -132,18 +132,31 @@ namespace KeyLayer
     {
         public readonly System.Collections.Generic.List<KeyCap> Keys;
         public readonly RenderState State = new RenderState();
-        public readonly float Unit;
+        public float Unit { get; private set; }
         public Action<int> KeyClicked;
 
         public KeyboardView(System.Collections.Generic.List<KeyCap> keys, float unit)
         {
             Keys = keys;
-            Unit = unit;
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
                      ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            SizeF s = KeyboardRenderer.Measure(unit);
-            Size = new Size((int)Math.Ceiling(s.Width) + 1, (int)Math.Ceiling(s.Height) + 1);
+            SetUnit(unit);
             Cursor = Cursors.Hand;
+        }
+
+        /// <summary>Size of one key unit in pixels; the control resizes to fit the keyboard.</summary>
+        public void SetUnit(float unit)
+        {
+            if (Math.Abs(unit - Unit) < 0.01f) return;
+            Unit = unit;
+            Size = SizeFor(unit);
+            Invalidate();
+        }
+
+        public static Size SizeFor(float unit)
+        {
+            SizeF s = KeyboardRenderer.Measure(unit);
+            return new Size((int)Math.Ceiling(s.Width) + 1, (int)Math.Ceiling(s.Height) + 1);
         }
 
         protected override void OnPaint(PaintEventArgs e)

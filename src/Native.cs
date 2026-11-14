@@ -244,6 +244,23 @@ namespace KeyLayer
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SystemParametersInfo(uint action, uint param, ref FILTERKEYS v, uint winIni);
 
+        [StructLayout(LayoutKind.Sequential)]
+        struct LASTINPUTINFO
+        {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
+        [DllImport("user32.dll")]
+        static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+        /// <summary>Tick count (GetTickCount) of the last keyboard / mouse input in the session, or 0.</summary>
+        public static uint LastInputTick()
+        {
+            var li = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };
+            return GetLastInputInfo(ref li) ? li.dwTime : 0;
+        }
+
         public static IntPtr ForegroundKeyboardLayout()
         {
             IntPtr fg = GetForegroundWindow();
